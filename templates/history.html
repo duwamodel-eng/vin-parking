@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="vi">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Lịch sử | Vin Parking</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+
+<body>
+  <header class="topbar">
+    <a class="brand" href="{{ url_for('dashboard') }}">
+      <span class="brand-icon small">VP</span>
+      <span>Vin Parking<small>SMART PARKING SYSTEM</small></span>
+    </a>
+    <nav>
+      <a class="nav-link" href="{{ url_for('dashboard') }}">Tổng quan</a>
+      <a class="nav-link active" href="{{ url_for('history_page') }}">Lịch sử</a>
+      <a class="nav-link" href="/drivers">Quản lý tài xế</a>
+    </nav>
+    <div class="user-area">
+      <span>{{ session.get('username', 'Quản trị viên') }}</span>
+      <form method="POST" action="{{ url_for('logout') }}">
+        <button class="btn secondary" type="submit">Đăng xuất</button>
+      </form>
+    </div>
+  </header>
+
+  <main class="container">
+    <section class="page-heading">
+      <div>
+        <p class="eyebrow">QUẢN LÝ DỮ LIỆU</p>
+        <h1>Lịch sử hoạt động</h1>
+        <p class="muted">Theo dõi các lần quét thẻ RFID vào và ra bãi.</p>
+      </div>
+      <a class="text-link" href="{{ url_for('dashboard') }}">← Quay lại tổng quan</a>
+    </section>
+
+    <section class="panel">
+      <div class="panel-heading">
+        <div>
+          <h2>Danh sách sự kiện</h2>
+          <p class="muted">Tổng số sự kiện: <strong id="total">0</strong></p>
+        </div>
+        <div>
+          <label for="event-filter">Loại sự kiện: </label>
+          <select id="event-filter">
+            <option value="">Tất cả</option>
+            <option value="ENTRY">Vào bãi thành công</option>
+            <option value="EXIT">Ra bãi thành công</option>
+            <option value="ENTRY_DENIED">Từ chối vào</option>
+            <option value="EXIT_DENIED">Từ chối ra</option>
+          </select>
+        </div>
+      </div>
+
+      <p id="history-error" class="error-text" role="alert"></p>
+
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Thời gian</th>
+              <th>Sự kiện</th>
+              <th>Mã tài xế</th>
+              <th>Tên tài xế</th>
+              <th>UID thẻ</th>
+              <th>Vị trí</th>
+            </tr>
+          </thead>
+          <tbody id="history-body">
+            <tr>
+              <td colspan="6">Đang tải dữ liệu...</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div
+        style="display:flex; justify-content:space-between; align-items:center; gap:12px; margin-top:20px; flex-wrap:wrap;">
+        <span class="muted" id="page-info">Trang 1</span>
+        <div style="display:flex; gap:8px;">
+          <button class="btn secondary" id="prev" type="button">← Trước</button>
+          <button class="btn primary" id="next" type="button">Tiếp →</button>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    let currentPage = 1;
+    const pageSize = 20;
+    let loading = false;
+
+    function escapeHtml(value) {
+      return String(value ?? '').replace(/[&<>"']/g, ch => ({
+        '&': '&amp;',
+        '<': '&lt;',
+        '>': '&gt;',
+        '"': '&quot;',
+        "'": '&#39;'
+      })[ch]);
+    }
+
+    async function loadHistory() {
+      if (loading) return;
+      loading = true;
+
+      const body = document.getElementById('history-body');
+      const error = document.getElementById('history-error');
+      const filter = document.getElementById('event-filter').value;
+
+      error.textContent = '';
+
+      try {
+        const params = new URLSearchParams({
+          page: String(currentPage),
+          limit: String(pageSize)
+        });
+
+        if (filter) params.set('event_type', filter);
+
+        const response = await fetch('/api/history?' + params.toString());
+
+        if (response.status === 401) {
+          location.href = '/login';
+          return;
+        }
+
+        if (!response.ok) {
+          throw new Error('Không tải được lịch sử hoạt động.');
+        }
+
+        const data = await response.json();
+        const events = Array.isArray(data.events) ? data.events : [];
+        const total = Number(data.total) || 0;
+        document.getElementById('total').textContent = String(total);
+
+        const totalPages = Math.max(1, Math.ceil(total / pageSize));
+        if (currentPage > totalPages) currentPage = totalPages;
+
+        if (events.length === 0) {
+          body.innerHTML = '<tr><td colspan="6">Không có sự kiện phù hợp.</td></tr>';
+        } else {
+          body.innerHTML = events.map(event => `
+            <tr>
+              <td>${escapeHtml(event.created_at)}</td>
+              <td><span class="event-badge">${escapeHtml(event.label)}</span></td>
+              <td>${escapeHtml(event.driver_id || '—')}</td>
+              <td>${escapeHtml(event.full_name || 'Chưa liên kết tài xế')}</td>
+              <td>${escapeHtml(event.uid || '—')}</td>
+              <td>${escapeHtml(event.slot_id || '—')}</td>
+            </tr>
+          `).join('');
+        }
+
+        document.getElementById('page-info').textContent =
+          `Trang ${currentPage} / ${totalPages}`;
+
+        document.getElementById('prev').disabled = currentPage <= 1;
+        document.getElementById('next').disabled = currentPage >= totalPages;
+      } catch (err) {
+        body.innerHTML = '<tr><td colspan="6">Không tải được dữ liệu.</td></tr>';
+        error.textContent = err instanceof Error
+          ? err.message
+          : 'Đã xảy ra lỗi khi tải lịch sử.';
+      } finally {
+        loading = false;
+      }
+    }
+
+    document.getElementById('event-filter').addEventListener('change', () => {
+      currentPage = 1;
+      loadHistory();
+    });
+
+    document.getElementById('prev').addEventListener('click', () => {
+      if (currentPage > 1) {
+        currentPage--;
+        loadHistory();
+      }
+    });
+
+    document.getElementById('next').addEventListener('click', () => {
+      const totalPages = Math.max(
+        1,
+        Math.ceil(Number(document.getElementById('total').textContent) / pageSize)
+      );
+
+      if (currentPage < totalPages) {
+        currentPage++;
+        loadHistory();
+      }
+    });
+
+    loadHistory();
+
+    // Tự cập nhật lịch sử mỗi 3 giây.
+    setInterval(loadHistory, 3000);
+  </script>
+</body>
+
+</html>

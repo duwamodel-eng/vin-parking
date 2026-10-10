@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="vi">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Dashboard | Vin Parking</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+
+<body>
+  <header class="topbar">
+    <a class="brand" href="{{ url_for('dashboard') }}">
+      <span class="brand-icon small">VP</span>
+      <span>Vin Parking<small>SMART PARKING SYSTEM</small></span>
+    </a>
+    <nav>
+      <a class="nav-link active" href="{{ url_for('dashboard') }}">Tổng quan</a>
+      <a class="nav-link" href="{{ url_for('history_page') }}">Lịch sử</a>
+      <a class="nav-link" href="/drivers">Quản lý tài xế</a>
+    </nav>
+    <div class="user-area">
+      <span>{{ session.get('username', 'Quản trị viên') }}</span>
+      <form method="POST" action="{{ url_for('logout') }}">
+        <button class="btn secondary" type="submit">Đăng xuất</button>
+      </form>
+    </div>
+  </header>
+
+  <main class="container">
+    <section class="page-heading">
+      <div>
+        <p class="eyebrow">BẢNG ĐIỀU KHIỂN</p>
+        <h1>Tổng quan bãi đỗ xe</h1>
+        <p class="muted">Theo dõi trạng thái các vị trí đỗ xe theo cảm biến.</p>
+      </div>
+      <div class="live-indicator"><span></span> Đang cập nhật</div>
+    </section>
+
+    <section class="stats-grid">
+      <article class="stat-card">
+        <p>Tổng vị trí</p>
+        <div class="stat-number" id="total">4</div>
+        <span class="stat-note">Vị trí trong bãi</span>
+      </article>
+      <article class="stat-card">
+        <p>Đang có xe</p>
+        <div class="stat-number occupied-text" id="occupied">—</div>
+        <span class="stat-note">Theo cảm biến IR</span>
+      </article>
+      <article class="stat-card">
+        <p>Còn trống</p>
+        <div class="stat-number free-text" id="free">—</div>
+        <span class="stat-note">Có thể tiếp nhận xe</span>
+      </article>
+    </section>
+
+    <section class="panel">
+      <div class="panel-heading">
+        <div>
+          <h2>Sơ đồ vị trí đỗ</h2>
+          <p class="muted">Trạng thái tự động cập nhật mỗi 3 giây.</p>
+        </div>
+        <span class="legend">
+          <i class="dot free-dot"></i> Trống
+          <i class="dot occupied-dot"></i> Có xe
+        </span>
+      </div>
+      <div class="slots-grid" id="slots">
+        <p>Đang tải dữ liệu...</p>
+      </div>
+      <p class="error-text" id="status-error" role="alert"></p>
+      <p class="muted small-text" id="last-updated"></p>
+    </section>
+
+    <section class="panel">
+      <div class="panel-heading">
+        <div>
+          <h2>Sự kiện gần đây</h2>
+          <p class="muted">Lịch sử quét thẻ RFID.</p>
+        </div>
+        <a class="text-link" href="{{ url_for('history_page') }}">Xem toàn bộ →</a>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Thời gian</th>
+              <th>Sự kiện</th>
+              <th>UID thẻ</th>
+              <th>Mã tài xế</th>
+              <th>Họ tên</th>
+            </tr>
+          </thead>
+          <tbody id="recent-events">
+            <tr>
+              <td colspan="5">Đang tải dữ liệu...</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    let dashboardLoading = false;
+    let eventsLoading = false;
+
+    function escapeHtml(value) {
+      return String(value ?? '').replace(/[&<>"']/g, ch => ({
+        '&': '&amp;',
+        '<': '&lt;',
+        '>': '&gt;',
+        '"': '&quot;',
+        "'": '&#39;'
+      })[ch]);
+    }
+
+    async function refreshDashboard() {
+      try {
+        const response = await fetch('/api/status');
+
+        if (response.status === 401) {
+          location.href = '/login';
+          return;
+        }
+        if (!response.ok) throw new Error('Không tải được trạng thái bãi đỗ.');
+
+        const data = await response.json();
+        document.getElementById('total').textContent = data.total ?? 0;
+        document.getElementById('occupied').textContent = data.occupied ?? 0;
+        document.getElementById('free').textContent = data.free ?? 0;
+
+        const slots = Array.isArray(data.slots) ? data.slots : [];
+        const slotsContainer = document.getElementById('slots');
+
+        if (slots.length === 0) {
+          slotsContainer.innerHTML = '<p>Chưa có dữ liệu vị trí đỗ.</p>';
+        } else {
+          slotsContainer.innerHTML = slots.map(slot => {
+            const occupied = Number(slot.status) === 0;
+            return `
+              <article class="slot-card ${occupied ? 'is-occupied' : 'is-free'}">
+                <div class="slot-top">
+                  <span>${escapeHtml(slot.slot_id || '—')}</span>
+                  <span class="slot-badge">${occupied ? 'Đang có xe' : 'Còn trống'}</span>
+                </div>
+                <div class="slot-symbol">🚗</div>
+                <p>${occupied ? 'Vị trí đang được sử dụng' : 'Sẵn sàng tiếp nhận xe'}</p>
+                <small>Cập nhật: ${escapeHtml(slot.updated_at || 'Chưa có')}</small>
+              </article>`;
+          }).join('');
+        }
+
+        document.getElementById('status-error').textContent = '';
+        document.getElementById('last-updated').textContent =
+          'Lần làm mới giao diện: ' + new Date().toLocaleTimeString('vi-VN');
+      } catch (error) {
+        document.getElementById('status-error').textContent =
+          error instanceof Error ? error.message : 'Lỗi tải trạng thái bãi đỗ.';
+      }
+    }
+
+    async function refreshEvents() {
+      try {
+        const response = await fetch('/api/history?limit=5');
+
+        if (response.status === 401) {
+          location.href = '/login';
+          return;
+        }
+        if (!response.ok) throw new Error('Không tải được lịch sử.');
+
+        const data = await response.json();
+        const body = document.getElementById('recent-events');
+        const events = Array.isArray(data.events) ? data.events : [];
+
+        if (events.length === 0) {
+          body.innerHTML = '<tr><td colspan="5">Chưa có sự kiện.</td></tr>';
+          return;
+        }
+
+        body.innerHTML = events.map(event => `
+          <tr>
+            <td>${escapeHtml(event.created_at)}</td>
+            <td><span class="event-badge">${escapeHtml(event.label)}</span></td>
+            <td>${escapeHtml(event.uid || '—')}</td>
+            <td>${escapeHtml(event.driver_id || '—')}</td>
+            <td>${escapeHtml(event.full_name || 'Chưa liên kết tài xế')}</td>
+          </tr>
+        `).join('');
+      } catch (error) {
+        document.getElementById('recent-events').innerHTML =
+          '<tr><td colspan="5">Chưa tải được lịch sử.</td></tr>';
+      }
+    }
+
+    async function refreshAll() {
+      if (dashboardLoading || eventsLoading) return;
+      dashboardLoading = true;
+      eventsLoading = true;
+      try {
+        await Promise.all([refreshDashboard(), refreshEvents()]);
+      } finally {
+        dashboardLoading = false;
+        eventsLoading = false;
+      }
+    }
+
+    refreshAll();
+    setInterval(refreshAll, 3000);
+  </script>
+</body>
+
+</html>

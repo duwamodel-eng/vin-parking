@@ -1,0 +1,53 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+.venv/
+venv/
+env/
+
+# Virtual environments and local secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# SQLite database and backups
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+*.bak
+*.backup
+
+# Face images, encodings and model weights
+face_data/
+face_images/
+*.jpg
+*.jpeg
+*.png
+*.pt
+*.onnx
+
+# Logs and temporary files
+*.log
+.DS_Store
+
+# Flask secret
+.flask_secret
+
+# Local database and sensitive data
+database/
+instance/
+
+# Driver biometric images
+face/
+
+# Python cache
+__pycache__/
+**/__pycache__/
+
+# Backup files
+*.bak

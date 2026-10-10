@@ -1,0 +1,823 @@
+<!DOCTYPE html>
+<html lang="vi">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Quản lý tài xế - Vin Parking</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+  <style>
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      font-family: Arial, sans-serif;
+    }
+
+    .drivers-container {
+      max-width: 1280px;
+      margin: 24px auto;
+      padding: 20px;
+    }
+
+    .panel {
+      margin: 20px 0;
+      padding: 20px;
+      border: 1px solid #ddd;
+      border-radius: 10px;
+      background: #fff;
+    }
+
+    .driver-form {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 16px;
+    }
+
+    .form-group {
+      display: flex;
+      flex-direction: column;
+      gap: 7px;
+      min-width: 0;
+    }
+
+    .form-group label {
+      font-weight: 600;
+    }
+
+    .form-group input,
+    .form-group select {
+      width: 100%;
+      min-width: 0;
+      padding: 10px;
+      border: 1px solid #bbb;
+      border-radius: 5px;
+      font-size: 15px;
+    }
+
+    .form-group input[readonly] {
+      background: #f2f2f2;
+    }
+
+    .actions {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 10px;
+      margin-top: 16px;
+    }
+
+    button,
+    .link-button {
+      display: inline-block;
+      padding: 10px 14px;
+      border: 0;
+      border-radius: 5px;
+      cursor: pointer;
+      font-size: 14px;
+      text-decoration: none;
+    }
+
+    button:disabled {
+      cursor: not-allowed;
+      opacity: .6;
+    }
+
+    .camera-video {
+      display: block;
+      width: 100%;
+      max-width: 520px;
+      max-height: 400px;
+      background: #222;
+      border-radius: 6px;
+    }
+
+    .message {
+      margin: 12px 0;
+      overflow-wrap: anywhere;
+    }
+
+    .table-wrap {
+      overflow-x: auto;
+    }
+
+    .drivers-table {
+      width: 100%;
+      border-collapse: collapse;
+    }
+
+    .drivers-table th,
+    .drivers-table td {
+      padding: 10px;
+      border-bottom: 1px solid #ddd;
+      text-align: left;
+      white-space: nowrap;
+    }
+
+    .drivers-table th {
+      background: #f4f4f4;
+    }
+
+    .row-actions {
+      display: flex;
+      gap: 6px;
+    }
+
+    .row-actions button {
+      padding: 7px 9px;
+    }
+
+    .edit-btn {
+      background: #e8f1ff;
+    }
+
+    .delete-btn {
+      background: #ffe8e8;
+    }
+
+    .hint {
+      color: #555;
+      font-size: 14px;
+    }
+
+    .modal-backdrop {
+      position: fixed;
+      inset: 0;
+      z-index: 1000;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      padding: 18px;
+      background: rgba(15, 23, 42, .58);
+    }
+
+    .modal-backdrop.open {
+      display: flex;
+    }
+
+    .edit-modal {
+      width: 100%;
+      max-width: 620px;
+      max-height: calc(100vh - 36px);
+      overflow-y: auto;
+      padding: 24px;
+      border-radius: 12px;
+      background: #fff;
+      box-shadow: 0 18px 55px rgba(0, 0, 0, .25);
+    }
+
+    .modal-header {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 16px;
+      margin-bottom: 18px;
+    }
+
+    .modal-header h2 {
+      margin: 0 0 6px;
+    }
+
+    .modal-close {
+      padding: 4px 10px;
+      background: #f1f5f9;
+      font-size: 22px;
+      line-height: 1.2;
+    }
+
+    .modal-actions {
+      display: flex;
+      justify-content: flex-end;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 20px;
+    }
+
+    .modal-cancel {
+      background: #eef2f7;
+    }
+
+    .modal-save {
+      background: #1769d2;
+      color: #fff;
+    }
+
+    .modal-error {
+      color: #b42318;
+      min-height: 1.2em;
+      margin: 12px 0 0;
+    }
+
+    body.modal-open {
+      overflow: hidden;
+    }
+
+    @media (max-width: 650px) {
+      .edit-modal {
+        padding: 16px;
+      }
+    }
+
+    @media (max-width: 650px) {
+      .drivers-container {
+        padding: 12px;
+      }
+
+      .driver-form {
+        grid-template-columns: 1fr;
+      }
+
+      .panel {
+        padding: 14px;
+      }
+    }
+  </style>
+</head>
+
+<body>
+
+  <header class="topbar">
+    <a class="brand" href="{{ url_for('dashboard') }}">
+      <span class="brand-icon small">VP</span>
+      <span>Vin Parking<small>SMART PARKING SYSTEM</small></span>
+    </a>
+    <nav>
+      <a class="nav-link" href="{{ url_for('dashboard') }}">Tổng quan</a>
+      <a class="nav-link" href="{{ url_for('history_page') }}">Lịch sử</a>
+      <a class="nav-link active" href="/drivers">Quản lý tài xế</a>
+    </nav>
+    <div class="user-area">
+      <span>{{ session.get('username', 'Quản trị viên') }}</span>
+      <form method="POST" action="{{ url_for('logout') }}">
+        <button class="btn secondary" type="submit">Đăng xuất</button>
+      </form>
+    </div>
+  </header>
+
+  <main class="drivers-container">
+    <h1>Quản lý tài xế - Vin Parking</h1>
+
+    <section class="panel">
+      <h2>Đăng ký tài xế mới</h2>
+      <form id="driverForm" autocomplete="off">
+        <div class="driver-form">
+          <div class="form-group">
+            <label for="driverId">Mã tài xế *</label>
+            <input id="driverId" name="driver_id" type="text" maxlength="30" placeholder="Đang tạo mã..." readonly
+              required>
+          </div>
+          <div class="form-group">
+            <label for="driverName">Họ và tên *</label>
+            <input id="driverName" name="full_name" type="text" maxlength="100" placeholder="Nhập họ tên" required>
+          </div>
+          <div class="form-group">
+            <label for="driverPhone">Số điện thoại *</label>
+            <input id="driverPhone" name="phone" type="tel" maxlength="20" placeholder="Ví dụ: 0912345678" required>
+          </div>
+          <div class="form-group">
+            <label for="driverUid">UID thẻ RFID *</label>
+            <input id="driverUid" name="uid" type="text" placeholder="Chưa quét thẻ" readonly required>
+          </div>
+        </div>
+        <div class="actions">
+          <button type="button" id="generateDriverIdBtn">Tạo mã mới</button>
+          <button type="button" id="scanRfidBtn">Quét RFID</button>
+          <button type="submit" id="registerBtn">Đăng ký tài xế</button>
+        </div>
+      </form>
+      <p id="registerMessage" class="message" role="status" aria-live="polite">Nhập thông tin, quét RFID và xử lý khuôn
+        mặt trước khi đăng ký.</p>
+    </section>
+
+    <section class="panel">
+      <h2>Đăng ký khuôn mặt</h2>
+      <p>Camera laptop được truy cập từ trình duyệt. Đặt một khuôn mặt ở giữa khung hình, đủ sáng và chỉ có một người
+        trong ảnh.</p>
+      <video id="faceVideo" class="camera-video" autoplay playsinline muted></video>
+      <canvas id="faceCanvas" hidden></canvas>
+      <div class="actions">
+        <button type="button" id="openCameraBtn">Mở camera laptop</button>
+        <button type="button" id="captureFaceBtn" disabled>Chụp và xử lý khuôn mặt</button>
+        <button type="button" id="stopCameraBtn" disabled>Tắt camera</button>
+      </div>
+      <p id="faceMessage" class="message" role="status" aria-live="polite">Chưa xử lý khuôn mặt.</p>
+    </section>
+
+    <div class="actions">
+      <a class="link-button" href="{{ url_for('dashboard') }}">Về Dashboard</a>
+      <button type="button" id="refreshBtn">Tải lại danh sách</button>
+    </div>
+
+    <section class="panel">
+      <h2>Danh sách tài xế</h2>
+      <p id="listMessage" class="message" role="status" aria-live="polite">Đang tải danh sách...</p>
+      <p class="hint">Sửa chỉ cập nhật họ tên, số điện thoại và trạng thái. Xóa hồ sơ sẽ gỡ liên kết RFID và dữ liệu
+        khuôn mặt; lịch sử bãi xe được giữ lại.</p>
+      <div class="table-wrap">
+        <table class="drivers-table">
+          <thead>
+            <tr>
+              <th>Mã tài xế</th>
+              <th>Họ tên</th>
+              <th>Số điện thoại</th>
+              <th>UID RFID</th>
+              <th>Khuôn mặt</th>
+              <th>Trạng thái</th>
+              <th>Ngày tạo</th>
+              <th>Thao tác</th>
+            </tr>
+          </thead>
+          <tbody id="driversBody">
+            <tr>
+              <td colspan="8">Đang tải...</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+
+  <div class="modal-backdrop" id="editModalBackdrop" aria-hidden="true">
+    <section class="edit-modal" role="dialog" aria-modal="true" aria-labelledby="editModalTitle">
+      <div class="modal-header">
+        <div>
+          <h2 id="editModalTitle">Cập nhật thông tin tài xế</h2>
+          <p class="hint">Bạn có thể chỉnh sửa các trường bên dưới rồi nhấn Cập nhật.</p>
+        </div>
+        <button type="button" class="modal-close" id="closeEditModalBtn" aria-label="Đóng">×</button>
+      </div>
+      <form id="editDriverForm">
+        <div class="driver-form">
+          <div class="form-group">
+            <label for="editDriverId">Mã tài xế</label>
+            <input id="editDriverId" type="text" readonly>
+          </div>
+          <div class="form-group">
+            <label for="editDriverName">Họ và tên *</label>
+            <input id="editDriverName" type="text" maxlength="100" required>
+          </div>
+          <div class="form-group">
+            <label for="editDriverPhone">Số điện thoại *</label>
+            <input id="editDriverPhone" type="tel" maxlength="20" required>
+          </div>
+          <div class="form-group">
+            <label for="editDriverUid">UID thẻ RFID</label>
+            <input id="editDriverUid" type="text" readonly>
+          </div>
+          <div class="form-group">
+            <label for="editDriverStatus">Trạng thái *</label>
+            <select id="editDriverStatus" required>
+              <option value="ACTIVE">ACTIVE — Đang hoạt động</option>
+              <option value="INACTIVE">INACTIVE — Ngừng hoạt động</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label for="editDriverFace">Khuôn mặt</label>
+            <input id="editDriverFace" type="text" readonly>
+          </div>
+        </div>
+        <p id="editDriverError" class="modal-error" role="alert"></p>
+        <div class="modal-actions">
+          <button type="button" class="modal-cancel" id="cancelEditBtn">Hủy</button>
+          <button type="submit" class="modal-save" id="saveEditBtn">Cập nhật</button>
+        </div>
+      </form>
+    </section>
+  </div>
+
+  <script>
+    "use strict";
+
+    const driverForm = document.getElementById("driverForm");
+    const driverIdInput = document.getElementById("driverId");
+    const driverNameInput = document.getElementById("driverName");
+    const driverPhoneInput = document.getElementById("driverPhone");
+    const driverUidInput = document.getElementById("driverUid");
+    const generateDriverIdBtn = document.getElementById("generateDriverIdBtn");
+    const scanRfidBtn = document.getElementById("scanRfidBtn");
+    const registerBtn = document.getElementById("registerBtn");
+    const registerMessage = document.getElementById("registerMessage");
+    const video = document.getElementById("faceVideo");
+    const canvas = document.getElementById("faceCanvas");
+    const faceMessage = document.getElementById("faceMessage");
+    const openCameraBtn = document.getElementById("openCameraBtn");
+    const captureFaceBtn = document.getElementById("captureFaceBtn");
+    const stopCameraBtn = document.getElementById("stopCameraBtn");
+    const listMessage = document.getElementById("listMessage");
+    const driversBody = document.getElementById("driversBody");
+    const refreshBtn = document.getElementById("refreshBtn");
+    const editModalBackdrop = document.getElementById("editModalBackdrop");
+    const editDriverForm = document.getElementById("editDriverForm");
+    const editDriverIdInput = document.getElementById("editDriverId");
+    const editDriverNameInput = document.getElementById("editDriverName");
+    const editDriverPhoneInput = document.getElementById("editDriverPhone");
+    const editDriverUidInput = document.getElementById("editDriverUid");
+    const editDriverStatusInput = document.getElementById("editDriverStatus");
+    const editDriverFaceInput = document.getElementById("editDriverFace");
+    const editDriverError = document.getElementById("editDriverError");
+    const saveEditBtn = document.getElementById("saveEditBtn");
+    let editingDriverId = null;
+
+    let cameraStream = null;
+    let faceToken = null;
+    let scannedUID = "";
+    let scanningRFID = false;
+    let registering = false;
+    let capturingFace = false;
+    let loadingDrivers = false;
+
+    function showRegisterMessage(message) { registerMessage.textContent = message; }
+    function showFaceMessage(message) { faceMessage.textContent = message; }
+
+    function generateDriverId() {
+      const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+      const values = new Uint32Array(6);
+      crypto.getRandomValues(values);
+      let suffix = "";
+      for (const value of values) suffix += chars[value % chars.length];
+      driverIdInput.value = "TX-" + suffix;
+    }
+
+    generateDriverIdBtn.addEventListener("click", () => {
+      if (registering) return;
+      generateDriverId();
+      showRegisterMessage("Đã tạo mã tài xế mới. Hãy kiểm tra trước khi đăng ký.");
+    });
+
+    async function readJSON(response) {
+      try { return await response.json(); }
+      catch { throw new Error("Máy chủ không trả về JSON hợp lệ. Hãy kiểm tra Flask và phiên đăng nhập."); }
+    }
+
+    async function apiRequest(url, options = {}) {
+      const response = await fetch(url, {
+        credentials: "same-origin",
+        cache: "no-store",
+        ...options,
+        headers: { ...(options.headers || {}) }
+      });
+      if (response.status === 401) {
+        window.location.href = "/login";
+        throw new Error("Phiên đăng nhập đã hết hạn.");
+      }
+      const data = await readJSON(response);
+      if (!response.ok || data.success === false) {
+        throw new Error(data.message || `Yêu cầu thất bại (HTTP ${response.status}).`);
+      }
+      return data;
+    }
+
+    async function postJSON(url, payload) {
+      return apiRequest(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+      });
+    }
+
+    async function loadDrivers() {
+      if (loadingDrivers) return;
+      loadingDrivers = true;
+      refreshBtn.disabled = true;
+      listMessage.textContent = "Đang tải danh sách...";
+      driversBody.replaceChildren();
+
+      try {
+        const data = await apiRequest("/api/drivers", { method: "GET" });
+        if (!data.success) throw new Error(data.message || "Không tải được danh sách tài xế.");
+        const drivers = Array.isArray(data.drivers) ? data.drivers : [];
+
+        if (drivers.length === 0) {
+          const row = document.createElement("tr");
+          const cell = document.createElement("td");
+          cell.colSpan = 8;
+          cell.textContent = "Chưa có tài xế nào.";
+          row.appendChild(cell);
+          driversBody.appendChild(row);
+        } else {
+          for (const driver of drivers) {
+            const row = document.createElement("tr");
+            addCell(row, driver.driver_id);
+            addCell(row, driver.full_name);
+            addCell(row, driver.phone);
+            addCell(row, driver.uid);
+            addCell(row, driver.face_registered ? "Đã đăng ký" : "Chưa đăng ký");
+            addCell(row, driver.status);
+            addCell(row, driver.created_at);
+
+            const actionCell = document.createElement("td");
+            const actions = document.createElement("div");
+            actions.className = "row-actions";
+
+            const editButton = document.createElement("button");
+            editButton.type = "button";
+            editButton.className = "edit-btn";
+            editButton.textContent = "Sửa";
+            editButton.addEventListener("click", () => openEditModal(driver));
+
+            const deleteButton = document.createElement("button");
+            deleteButton.type = "button";
+            deleteButton.className = "delete-btn";
+            deleteButton.textContent = "Xóa";
+            deleteButton.addEventListener("click", () => deleteDriver(driver));
+
+            actions.append(editButton, deleteButton);
+            actionCell.appendChild(actions);
+            row.appendChild(actionCell);
+            driversBody.appendChild(row);
+          }
+        }
+        listMessage.textContent = `Tổng số tài xế: ${data.total ?? drivers.length}`;
+      } catch (error) {
+        listMessage.textContent = error.message;
+        const row = document.createElement("tr");
+        const cell = document.createElement("td");
+        cell.colSpan = 8;
+        cell.textContent = "Không tải được danh sách.";
+        row.appendChild(cell);
+        driversBody.appendChild(row);
+      } finally {
+        loadingDrivers = false;
+        refreshBtn.disabled = false;
+      }
+    }
+
+    function addCell(row, value) {
+      const cell = document.createElement("td");
+      cell.textContent = value === null || value === undefined || value === "" ? "—" : String(value);
+      row.appendChild(cell);
+    }
+
+    function openEditModal(driver) {
+      editingDriverId = driver.driver_id;
+      editDriverIdInput.value = driver.driver_id || "";
+      editDriverNameInput.value = driver.full_name || "";
+      editDriverPhoneInput.value = driver.phone || "";
+      editDriverUidInput.value = driver.uid || "";
+      editDriverStatusInput.value = String(driver.status || "ACTIVE").toUpperCase();
+      editDriverFaceInput.value = driver.face_registered ? "Đã đăng ký" : "Chưa đăng ký";
+      editDriverError.textContent = "";
+      saveEditBtn.disabled = false;
+      editModalBackdrop.classList.add("open");
+      editModalBackdrop.setAttribute("aria-hidden", "false");
+      document.body.classList.add("modal-open");
+      editDriverNameInput.focus();
+    }
+
+    function closeEditModal() {
+      editModalBackdrop.classList.remove("open");
+      editModalBackdrop.setAttribute("aria-hidden", "true");
+      document.body.classList.remove("modal-open");
+      editingDriverId = null;
+      editDriverError.textContent = "";
+    }
+
+    document.getElementById("closeEditModalBtn").addEventListener("click", closeEditModal);
+    document.getElementById("cancelEditBtn").addEventListener("click", closeEditModal);
+
+    editModalBackdrop.addEventListener("click", event => {
+      if (event.target === editModalBackdrop) closeEditModal();
+    });
+
+    document.addEventListener("keydown", event => {
+      if (event.key === "Escape" && editModalBackdrop.classList.contains("open")) {
+        closeEditModal();
+      }
+    });
+
+    editDriverForm.addEventListener("submit", async event => {
+      event.preventDefault();
+      if (!editingDriverId || saveEditBtn.disabled) return;
+
+      const full_name = editDriverNameInput.value.trim();
+      const phone = editDriverPhoneInput.value.trim();
+      const status = editDriverStatusInput.value;
+
+      if (!full_name || !phone) {
+        editDriverError.textContent = "Họ tên và số điện thoại không được để trống.";
+        return;
+      }
+      if (!["ACTIVE", "INACTIVE"].includes(status)) {
+        editDriverError.textContent = "Trạng thái không hợp lệ.";
+        return;
+      }
+
+      saveEditBtn.disabled = true;
+      saveEditBtn.textContent = "Đang cập nhật...";
+      editDriverError.textContent = "";
+
+      try {
+        await apiRequest(`/api/drivers/${encodeURIComponent(editingDriverId)}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ full_name, phone, status })
+        });
+        const updatedId = editingDriverId;
+        closeEditModal();
+        listMessage.textContent = `Đã cập nhật tài xế ${updatedId}.`;
+        await loadDrivers();
+      } catch (error) {
+        editDriverError.textContent = "Cập nhật thất bại: " + error.message;
+      } finally {
+        saveEditBtn.disabled = false;
+        saveEditBtn.textContent = "Cập nhật";
+      }
+    });
+
+    async function deleteDriver(driver) {
+      const confirmed = window.confirm(
+        `Bạn chắc chắn muốn xóa hồ sơ tài xế ${driver.driver_id} - ${driver.full_name}?\n\n` +
+        "Thao tác này xóa liên kết RFID và dữ liệu khuôn mặt. Lịch sử bãi xe được giữ lại. Không thể tự hoàn tác."
+      );
+      if (!confirmed) return;
+
+      try {
+        await apiRequest(`/api/drivers/${encodeURIComponent(driver.driver_id)}`, { method: "DELETE" });
+        listMessage.textContent = `Đã xóa hồ sơ tài xế ${driver.driver_id}.`;
+        await loadDrivers();
+      } catch (error) {
+        window.alert("Xóa thất bại: " + error.message);
+      }
+    }
+
+    refreshBtn.addEventListener("click", loadDrivers);
+
+    scanRfidBtn.addEventListener("click", async () => {
+      if (scanningRFID || registering) return;
+      scanningRFID = true;
+      scanRfidBtn.disabled = true;
+      scannedUID = "";
+      driverUidInput.value = "";
+      showRegisterMessage("Đang mở phiên quét RFID...");
+
+      try {
+        await postJSON("/api/rfid/scan/start", {});
+        showRegisterMessage("Đưa thẻ lên đầu đọc RFID. Thời gian chờ tối đa 30 giây.");
+        const deadline = Date.now() + 30000;
+
+        while (Date.now() < deadline) {
+          await new Promise(resolve => setTimeout(resolve, 500));
+          const data = await apiRequest("/api/rfid/scan/result", { method: "GET" });
+
+          if (data.found && data.uid) {
+            const uid = String(data.uid).trim().toUpperCase();
+            if (!/^[0-9A-F]{2}(:[0-9A-F]{2})+$/.test(uid)) {
+              throw new Error("UID nhận được không đúng định dạng.");
+            }
+            scannedUID = uid;
+            driverUidInput.value = uid;
+            showRegisterMessage("Đã đọc UID " + uid + ". Hãy kiểm tra trước khi đăng ký.");
+            return;
+          }
+          if (data.active === false) break;
+        }
+        showRegisterMessage("Hết thời gian chờ hoặc chưa nhận được thẻ. Bấm Quét RFID để thử lại.");
+      } catch (error) {
+        showRegisterMessage("Lỗi quét RFID: " + error.message);
+      } finally {
+        scanningRFID = false;
+        scanRfidBtn.disabled = false;
+      }
+    });
+
+    function stopCamera() {
+      if (cameraStream) {
+        cameraStream.getTracks().forEach(track => track.stop());
+        cameraStream = null;
+      }
+      video.srcObject = null;
+      captureFaceBtn.disabled = true;
+      stopCameraBtn.disabled = true;
+    }
+
+    openCameraBtn.addEventListener("click", async () => {
+      if (capturingFace || registering) return;
+      try {
+        if (!navigator.mediaDevices?.getUserMedia) {
+          throw new Error("Trình duyệt không hỗ trợ camera hoặc trang chưa ở HTTPS/localhost.");
+        }
+        stopCamera();
+        faceToken = null;
+        showFaceMessage("Đang mở camera...");
+        cameraStream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: "user" },
+          audio: false
+        });
+        video.srcObject = cameraStream;
+        await video.play();
+        captureFaceBtn.disabled = false;
+        stopCameraBtn.disabled = false;
+        showFaceMessage("Camera đã mở. Đặt một khuôn mặt ở giữa khung hình, đủ sáng.");
+      } catch (error) {
+        stopCamera();
+        showFaceMessage("Không mở được camera: " + error.message);
+      }
+    });
+
+    stopCameraBtn.addEventListener("click", () => {
+      stopCamera();
+      showFaceMessage("Camera đã tắt.");
+    });
+
+    captureFaceBtn.addEventListener("click", async () => {
+      if (capturingFace || registering) return;
+      if (!cameraStream || !video.videoWidth || !video.videoHeight) {
+        showFaceMessage("Hãy mở camera và chờ hình ảnh xuất hiện trước.");
+        return;
+      }
+
+      capturingFace = true;
+      captureFaceBtn.disabled = true;
+      faceToken = null;
+      showFaceMessage("Đang gửi ảnh đến Raspberry Pi để xử lý...");
+
+      try {
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+        const context = canvas.getContext("2d");
+        if (!context) throw new Error("Không tạo được vùng xử lý ảnh.");
+        context.drawImage(video, 0, 0, canvas.width, canvas.height);
+        const image = canvas.toDataURL("image/jpeg", 0.85);
+        const result = await postJSON("/api/face/encode", { image });
+        if (!result.face_token) throw new Error("Máy chủ không trả về face_token.");
+        faceToken = result.face_token;
+        showFaceMessage("Xử lý khuôn mặt thành công. Hãy hoàn tất đăng ký trong 5 phút.");
+      } catch (error) {
+        faceToken = null;
+        showFaceMessage("Không xử lý được khuôn mặt: " + error.message);
+      } finally {
+        capturingFace = false;
+        captureFaceBtn.disabled = !cameraStream;
+      }
+    });
+
+    driverForm.addEventListener("submit", async event => {
+      event.preventDefault();
+      if (registering || scanningRFID || capturingFace) {
+        showRegisterMessage("Hãy chờ thao tác quét RFID hoặc xử lý khuôn mặt hoàn tất.");
+        return;
+      }
+
+      const driver_id = driverIdInput.value.trim().toUpperCase();
+      const full_name = driverNameInput.value.trim();
+      const phone = driverPhoneInput.value.trim();
+
+      if (!driver_id || !full_name || !phone) {
+        showRegisterMessage("Vui lòng nhập đầy đủ mã tài xế, họ tên và số điện thoại.");
+        return;
+      }
+      if (!/^TX-[A-Z0-9]{6}$/.test(driver_id)) {
+        showRegisterMessage("Mã tài xế không đúng định dạng. Hãy tạo mã mới.");
+        return;
+      }
+      if (!scannedUID || scannedUID !== driverUidInput.value.trim().toUpperCase()) {
+        showRegisterMessage("Hãy quét RFID trước khi đăng ký.");
+        return;
+      }
+      if (!faceToken) {
+        showRegisterMessage("Hãy mở camera và xử lý khuôn mặt trước khi đăng ký.");
+        return;
+      }
+
+      registering = true;
+      registerBtn.disabled = true;
+      scanRfidBtn.disabled = true;
+      generateDriverIdBtn.disabled = true;
+      openCameraBtn.disabled = true;
+      captureFaceBtn.disabled = true;
+      showRegisterMessage("Đang đăng ký tài xế vào hệ thống...");
+
+      try {
+        await postJSON("/api/drivers/register", {
+          driver_id, full_name, phone, uid: scannedUID, face_token: faceToken
+        });
+        showRegisterMessage("Đăng ký tài xế thành công. Danh sách đã được cập nhật.");
+        driverForm.reset();
+        scannedUID = "";
+        faceToken = null;
+        stopCamera();
+        showFaceMessage("Có thể mở camera để đăng ký người tiếp theo.");
+        generateDriverId();
+        await loadDrivers();
+      } catch (error) {
+        showRegisterMessage("Đăng ký thất bại: " + error.message);
+      } finally {
+        registering = false;
+        registerBtn.disabled = false;
+        scanRfidBtn.disabled = false;
+        generateDriverIdBtn.disabled = false;
+        openCameraBtn.disabled = false;
+        captureFaceBtn.disabled = !cameraStream;
+      }
+    });
+
+    window.addEventListener("beforeunload", stopCamera);
+    generateDriverId();
+    loadDrivers();
+  </script>
+</body>
+
+</html>
