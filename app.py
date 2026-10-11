@@ -348,6 +348,57 @@ def register_driver():
     conn = get_db()
     try:
         conn.execute("BEGIN IMMEDIATE")
+                # Kiem tra UID da duoc dang ky chua
+        uid_exists = conn.execute(
+            """
+            SELECT driver_id
+            FROM rfid_cards
+            WHERE UPPER(uid) = ?
+            LIMIT 1
+            """,
+            (uid,),
+        ).fetchone()
+
+        if uid_exists:
+            conn.rollback()
+            return json_error(
+                f"UID RFID đã được đăng ký cho tài xế "
+                f"{uid_exists['driver_id']}. Vui lòng dùng thẻ khác.",
+                409,
+            )
+                # Chan dang ky lai khuon mat da ton tai
+        existing_faces = conn.execute(
+            "SELECT driver_id, encoding_json FROM face_encodings"
+        ).fetchall()
+
+        new_encoding = np.asarray(encoding, dtype=np.float64)
+
+        for existing_driver_id, encoding_json in existing_faces:
+            try:
+                known_encoding = np.asarray(
+                    json.loads(encoding_json), dtype=np.float64
+                )
+
+                if (
+                    known_encoding.shape != (128,)
+                    or not np.isfinite(known_encoding).all()
+                ):
+                    continue
+
+                distance = float(
+                    np.linalg.norm(new_encoding - known_encoding)
+                )
+
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+
+            if distance < 0.42:
+                conn.rollback()
+                return json_error(
+                    f"Khuôn mặt có thể đã đăng ký cho tài xế "
+                    f"{existing_driver_id}. Vui lòng kiểm tra hồ sơ hiện có.",
+                    409,
+                )
         conn.execute(
             "INSERT INTO drivers (driver_id, full_name, phone, status) VALUES (?, ?, ?, 'ACTIVE')",
             (driver_id, full_name, phone),
