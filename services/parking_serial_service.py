@@ -281,36 +281,32 @@ def enqueue_registration_uid(conn, uid):
 # Authorization for normal entry
 # ------------------------------------------------------------
 
-def is_authorized_for_entry(conn, uid):
-    """
-    Preserve the three existing test UIDs.
-    Also allow a UID linked to an ACTIVE driver in the database.
-    """
+def get_entry_driver(conn, uid):
+    """Trả về tài xế hợp lệ có RFID và dữ liệu khuôn mặt."""
     uid = uid.strip().upper()
 
-    if uid in LEGACY_VALID_UIDS:
-        return True
-
     try:
-        row = conn.execute(
+        return conn.execute(
             """
-            SELECT 1
-            FROM rfid_cards AS card
-            JOIN drivers AS driver
-              ON driver.driver_id = card.driver_id
-            WHERE UPPER(card.uid) = ?
-              AND driver.status = 'ACTIVE'
+            SELECT
+                d.driver_id,
+                d.full_name
+            FROM rfid_cards AS r
+            JOIN drivers AS d
+                ON d.driver_id = r.driver_id
+            JOIN face_encodings AS f
+                ON f.driver_id = d.driver_id
+            WHERE UPPER(r.uid) = ?
+              AND d.status = 'ACTIVE'
             LIMIT 1
             """,
             (uid,)
         ).fetchone()
 
-        return row is not None
-
     except sqlite3.Error as exc:
-        # Fail closed if authorization data cannot be checked.
-        print(f"[AUTH] Database authorization error: {exc}")
-        return False
+        print(f"[AUTH] Database error: {exc}")
+        return None
+
 
 
 # ------------------------------------------------------------
@@ -323,42 +319,145 @@ def send_wroom_result(ser, result):
     ser.flush()
     print(f"[WROOM -> ESP32] {message.strip()}")
 
+FACE_AUTH_TIMEOUT = 32.0
+FACE_AUTH_POLL_INTERVAL = 0.2
+
+
+def create_face_auth_request(conn, uid, driver_id):
+    """Tạo yêu cầu chờ xác thực khuôn mặt từ giao diện web."""
+    now = time.time()
+
+    cursor = conn.execute(
+        """
+        INSERT INTO face_auth_requests
+            (uid, driver_id, state, created_at, message)
+        VALUES (?, ?, 'PENDING', ?, 'Đang chờ xác thực khuôn mặt')
+        """,
+        (uid, driver_id, now)
+    )
+    conn.commit()
+
+    request_id = cursor.lastrowid
+    print(
+        f"[FACE AUTH] Request #{request_id}: "
+        f"UID={uid}, driver={driver_id}"
+    )
+    return request_id
+
+
+def wait_face_auth_result(conn, request_id):
+    """Chờ web xác thực; quá hạn hoặc lỗi đều không cấp quyền."""
+    deadline = time.monotonic() + FACE_AUTH_TIMEOUT
+
+    while time.monotonic() < deadline:
+        row = conn.execute(
+            """
+            SELECT state, message
+            FROM face_auth_requests
+            WHERE id = ?
+            """,
+            (request_id,)
+        ).fetchone()
+
+        if row is None:
+            return "DENY"
+
+        state = row["state"] if isinstance(row, sqlite3.Row) else row[0]
+
+        if state in ("ALLOW", "DENY", "EXPIRED"):
+            return state
+
+        time.sleep(FACE_AUTH_POLL_INTERVAL)
+
+    # Chỉ chuyển sang EXPIRED nếu yêu cầu vẫn còn PENDING.
+    conn.execute(
+        """
+        UPDATE face_auth_requests
+        SET state = 'EXPIRED',
+            processed_at = ?,
+            message = 'Hết thời gian xác thực'
+        WHERE id = ? AND state = 'PENDING'
+        """,
+        (time.time(), request_id)
+    )
+    conn.commit()
+
+    row = conn.execute(
+        "SELECT state FROM face_auth_requests WHERE id = ?",
+        (request_id,)
+    ).fetchone()
+
+    state = row["state"] if isinstance(row, sqlite3.Row) else row[0]
+    return state
 
 def process_wroom_card(conn, ser, uid):
     uid = uid.strip().upper()
 
     if not is_valid_uid(uid):
         print(f"[WROOM] Invalid UID: {uid}")
-        send_wroom_result(ser, "ERROR")
+        send_wroom_result(ser, "ENTRY_DENIED")
         return
 
-    # PRIORITY 1: registration.
-    # Do not record an ENTRY event and do not authorize opening.
+    # Ưu tiên chế độ đăng ký RFID.
     if registration_is_active(conn):
         try:
             if enqueue_registration_uid(conn, uid):
                 send_wroom_result(ser, "REGISTERED")
             else:
-                # The registration window may have expired between checks.
-                if is_authorized_for_entry(conn, uid):
-                    save_history(conn, "ENTRY", uid)
-                    send_wroom_result(ser, "ENTRY_ALLOWED")
-                else:
-                    save_history(conn, "ENTRY_DENIED", uid)
-                    send_wroom_result(ser, "ENTRY_DENIED")
+                # Cửa sổ đăng ký vừa hết hạn: từ chối an toàn.
+                save_history(conn, "ENTRY_DENIED", uid)
+                send_wroom_result(ser, "ENTRY_DENIED")
         except Exception as exc:
+            conn.rollback()
             print(f"[REGISTRATION][ERROR] {exc}")
-            send_wroom_result(ser, "ERROR")
-
+            send_wroom_result(ser, "ENTRY_DENIED")
         return
 
-    # PRIORITY 2: normal entry.
-    if is_authorized_for_entry(conn, uid):
+    # Bước 1: RFID phải thuộc tài xế ACTIVE có dữ liệu khuôn mặt.
+    driver = get_entry_driver(conn, uid)
+
+    if driver is None:
+        print(f"[AUTH] RFID không hợp lệ, tài xế không ACTIVE "
+              f"hoặc chưa có dữ liệu khuôn mặt: {uid}")
+        save_history(conn, "ENTRY_DENIED", uid)
+        send_wroom_result(ser, "ENTRY_DENIED")
+        return
+
+    driver_id = (
+        driver["driver_id"]
+        if isinstance(driver, sqlite3.Row)
+        else driver[0]
+    )
+
+    # Bước 2: tạo yêu cầu để giao diện camera trên laptop xử lý.
+    try:
+        request_id = create_face_auth_request(
+            conn, uid, driver_id
+        )
+    except Exception as exc:
+        conn.rollback()
+        print(f"[FACE AUTH][ERROR] Không tạo được yêu cầu: {exc}")
+        save_history(conn, "ENTRY_DENIED", uid)
+        send_wroom_result(ser, "ENTRY_DENIED")
+        return
+
+    # Bước 3: chỉ chờ quyết định từ API xác thực khuôn mặt.
+    try:
+        result = wait_face_auth_result(conn, request_id)
+    except Exception as exc:
+        conn.rollback()
+        print(f"[FACE AUTH][ERROR] {exc}")
+        result = "DENY"
+
+    # Bước 4: fail-closed — chỉ ALLOW mới được vào.
+    if result == "ALLOW":
         save_history(conn, "ENTRY", uid)
         send_wroom_result(ser, "ENTRY_ALLOWED")
+        print(f"[ACCESS GRANTED] UID={uid}")
     else:
         save_history(conn, "ENTRY_DENIED", uid)
         send_wroom_result(ser, "ENTRY_DENIED")
+        print(f"[ACCESS DENIED] UID={uid}, result={result}")
 
 
 def process_wroom_line(conn, ser, line):

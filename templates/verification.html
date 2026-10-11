@@ -1,0 +1,375 @@
+<!DOCTYPE html>
+<html lang="vi">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Xác thực khuôn mặt | Vin Parking</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+  <style>
+    .verify-container {
+      max-width: 850px;
+      margin: 30px auto;
+      padding: 20px;
+    }
+
+    .verify-panel {
+      padding: 24px;
+      background: #fff;
+      border: 1px solid #ddd;
+      border-radius: 12px;
+    }
+
+    #camera {
+      display: block;
+      width: 100%;
+      max-width: 640px;
+      max-height: 480px;
+      margin-top: 16px;
+      background: #222;
+      border-radius: 8px;
+    }
+
+    .verify-message {
+      margin: 16px 0;
+      padding: 14px;
+      border-radius: 8px;
+      overflow-wrap: anywhere;
+      font-weight: 600;
+      background: #f1f5f9;
+      color: #334155;
+    }
+
+    .verify-message.success {
+      background: #dcfce7;
+      color: #166534;
+      border: 1px solid #22c55e;
+      font-size: 20px;
+    }
+
+    .verify-message.error {
+      background: #fee2e2;
+      color: #991b1b;
+      border: 1px solid #ef4444;
+      font-size: 20px;
+    }
+
+    .verify-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 16px;
+    }
+
+    #captureBtn:disabled {
+      opacity: .5;
+      cursor: not-allowed;
+    }
+  </style>
+</head>
+
+<body>
+  <header class="topbar">
+    <a class="brand" href="{{ url_for('dashboard') }}">
+      <span class="brand-icon small">VP</span>
+      <span>Vin Parking<small>SMART PARKING SYSTEM</small></span>
+    </a>
+    <nav>
+      <a class="nav-link" href="{{ url_for('dashboard') }}">Tổng quan</a>
+
+      <a class="nav-link" href="{{ url_for('history_page') }}">Lịch sử</a>
+
+      <a class="nav-link" href="{{ url_for('drivers_page') }}">Quản lý tài xế</a>
+
+      <a class="nav-link" href="{{ url_for('verification_page') }}">Xác thực tài xế</a>
+    </nav>
+  </header>
+
+  <main class="verify-container">
+    <section class="verify-panel">
+      <h1>Xác thực khuôn mặt tài xế</h1>
+      <p>Đưa thẻ RFID tại cổng vào. Khi có yêu cầu, kiểm tra thông tin tài xế rồi chụp khuôn mặt để xác thực.</p>
+
+      <p><strong>Trạng thái:</strong>
+        <span id="status">Đang kết nối...</span>
+      </p>
+
+      <div id="requestInfo" hidden>
+        <p><strong>Mã tài xế:</strong> <span id="driverId">—</span></p>
+        <p><strong>Họ tên:</strong> <span id="driverName">—</span></p>
+        <p><strong>UID RFID:</strong> <span id="uid">—</span></p>
+      </div>
+
+      <video id="camera" autoplay playsinline muted></video>
+      <canvas id="canvas" hidden></canvas>
+
+      <div class="verify-actions">
+        <button type="button" id="openCameraBtn">Mở camera</button>
+        <button type="button" id="captureBtn" disabled>Chụp và xác thực</button>
+        <button type="button" id="stopCameraBtn" disabled>Tắt camera</button>
+      </div>
+
+      <p id="message" class="verify-message" role="status" aria-live="polite">
+        Đang chờ thẻ RFID...
+      </p>
+    </section>
+  </main>
+
+  <script>
+    "use strict";
+
+    const video = document.getElementById("camera");
+    const canvas = document.getElementById("canvas");
+    const statusText = document.getElementById("status");
+    const message = document.getElementById("message");
+    const requestInfo = document.getElementById("requestInfo");
+    const driverIdText = document.getElementById("driverId");
+    const driverNameText = document.getElementById("driverName");
+    const uidText = document.getElementById("uid");
+    const openCameraBtn = document.getElementById("openCameraBtn");
+    const captureBtn = document.getElementById("captureBtn");
+    const stopCameraBtn = document.getElementById("stopCameraBtn");
+
+    let stream = null;
+    let activeRequestId = null;
+    let polling = false;
+    let capturing = false;
+    let lastRequestId = null;
+
+    let resetTimer = null;
+
+
+    function resetVerificationUI() {
+      resetTimer = null;
+      activeRequestId = null;
+      lastRequestId = null;
+
+      requestInfo.hidden = true;
+      driverIdText.textContent = "—";
+      driverNameText.textContent = "—";
+      uidText.textContent = "—";
+
+      statusText.textContent = "Đang chờ thẻ RFID...";
+      message.className = "verify-message";
+      message.textContent = "Đang chờ thẻ RFID...";
+
+      captureBtn.disabled = true;
+    }
+
+
+    function scheduleReset() {
+      clearTimeout(resetTimer);
+      resetTimer = setTimeout(() => {
+        resetVerificationUI();
+      }, 4000);
+    }
+
+    function showResult(type, text) {
+      message.className = "verify-message " + type;
+      message.textContent = text;
+    }
+
+    async function readResponse(response) {
+      let data;
+      try {
+        data = await response.json();
+      } catch {
+        throw new Error("Máy chủ không trả về JSON hợp lệ.");
+      }
+
+      if (response.status === 401) {
+        location.href = "/login";
+        throw new Error("Phiên đăng nhập đã hết hạn.");
+      }
+
+      if (!response.ok || data.success === false) {
+        const error = new Error(data.message || "Yêu cầu thất bại.");
+        error.status = response.status;
+        throw error;
+      }
+      return data;
+    }
+
+    async function openCamera() {
+      try {
+        if (!navigator.mediaDevices?.getUserMedia) {
+          throw new Error(
+            "Trình duyệt không cho phép truy cập camera. Hãy dùng HTTPS hoặc localhost."
+          );
+        }
+
+        stopCamera();
+
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: "user" },
+          audio: false
+        });
+
+        video.srcObject = stream;
+        await video.play();
+
+        openCameraBtn.disabled = true;
+        stopCameraBtn.disabled = false;
+        captureBtn.disabled = activeRequestId === null || capturing;
+        message.textContent = "Camera đã mở. Đặt một khuôn mặt ở giữa khung hình, đủ sáng.";
+      } catch (error) {
+        stopCamera();
+        message.textContent = "Không mở được camera: " + error.message;
+      }
+    }
+
+    function stopCamera() {
+      if (stream) {
+        stream.getTracks().forEach(track => track.stop());
+        stream = null;
+      }
+
+      video.srcObject = null;
+      openCameraBtn.disabled = false;
+      stopCameraBtn.disabled = true;
+      captureBtn.disabled = true;
+    }
+
+    async function pollPending() {
+      if (polling || capturing) return;
+      polling = true;
+
+      try {
+        const response = await fetch("/api/face/pending", {
+          credentials: "same-origin",
+          cache: "no-store"
+        });
+        const data = await readResponse(response);
+
+        if (resetTimer && data.pending) {
+          clearTimeout(resetTimer);
+          resetTimer = null;
+        }
+
+
+        if (!data.pending) {
+          // Không ghi đè kết quả trong thời gian chờ tự reset.
+          if (resetTimer) {
+            return;
+          }
+
+          activeRequestId = null;
+          lastRequestId = null;
+          requestInfo.hidden = true;
+          captureBtn.disabled = true;
+          statusText.textContent = "Đang chờ thẻ RFID...";
+          message.className = "verify-message";
+          message.textContent = "Chưa có yêu cầu xác thực.";
+          return;
+        }
+
+
+        activeRequestId = data.request_id;
+        driverIdText.textContent = data.driver_id || "—";
+        driverNameText.textContent = data.full_name || "—";
+        uidText.textContent = data.uid || "—";
+        requestInfo.hidden = false;
+        statusText.textContent = "Có yêu cầu xác thực";
+
+        if (lastRequestId !== activeRequestId) {
+          lastRequestId = activeRequestId;
+          message.textContent = "Có yêu cầu mới. Hãy kiểm tra tài xế và chụp khuôn mặt.";
+        }
+
+        captureBtn.disabled = !stream || capturing;
+      } catch (error) {
+        statusText.textContent = "Lỗi kết nối";
+        message.textContent = error.message;
+      } finally {
+        polling = false;
+      }
+    }
+
+    async function captureAndVerify() {
+      if (capturing || activeRequestId === null) return;
+
+      if (!stream || !video.videoWidth || !video.videoHeight) {
+        message.textContent = "Hãy mở camera và chờ hình ảnh xuất hiện.";
+        return;
+      }
+
+      capturing = true;
+      captureBtn.disabled = true;
+      const requestId = activeRequestId;
+      message.textContent = "Đang gửi ảnh và xác thực...";
+
+      try {
+        const maxSize = 960;
+        const scale = Math.min(
+          1,
+          maxSize / Math.max(video.videoWidth, video.videoHeight)
+        );
+
+        canvas.width = Math.round(video.videoWidth * scale);
+        canvas.height = Math.round(video.videoHeight * scale);
+
+        const context = canvas.getContext("2d");
+        if (!context) throw new Error("Không tạo được ảnh.");
+
+        context.drawImage(video, 0, 0, canvas.width, canvas.height);
+        const image = canvas.toDataURL("image/jpeg", 0.85);
+
+        const response = await fetch("/api/face/verify", {
+          method: "POST",
+          credentials: "same-origin",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            request_id: requestId,
+            image: image
+          })
+        });
+
+        const data = await readResponse(response);
+
+        if (data.verified === true) {
+          showResult("success", "✓ HỢP LỆ — " +
+            (data.message || "Xác thực khuôn mặt thành công."));
+        } else {
+          showResult("error", "✗ KHÔNG HỢP LỆ — " +
+            (data.message || "Xác thực khuôn mặt thất bại."));
+        }
+
+        if (data.verified === true) {
+          statusText.textContent = "Đã xác thực";
+          scheduleReset();
+        } else {
+          statusText.textContent = "Bị từ chối";
+          scheduleReset();
+        }
+      } catch (error) {
+        showResult("error", error.message);
+
+        if (error.status === 409) {
+          activeRequestId = null;
+          lastRequestId = null;
+          requestInfo.hidden = true;
+          statusText.textContent = "Yêu cầu hết hạn hoặc đã xử lý";
+        }
+        // Lỗi ảnh HTTP 400: giữ yêu cầu để có thể chụp lại.
+      } finally {
+        capturing = false;
+        captureBtn.disabled = !stream || activeRequestId === null;
+        pollPending();
+      }
+    }
+
+    openCameraBtn.addEventListener("click", openCamera);
+    stopCameraBtn.addEventListener("click", stopCamera);
+    captureBtn.addEventListener("click", captureAndVerify);
+
+    pollPending();
+    const pollTimer = setInterval(pollPending, 1000);
+
+    window.addEventListener("beforeunload", () => {
+      clearInterval(pollTimer);
+      stopCamera();
+    });
+  </script>
+</body>
+
+</html>

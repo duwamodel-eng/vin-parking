@@ -15,9 +15,13 @@
       <span>Vin Parking<small>SMART PARKING SYSTEM</small></span>
     </a>
     <nav>
-      <a class="nav-link active" href="{{ url_for('dashboard') }}">Tổng quan</a>
+      <a class="nav-link " href="{{ url_for('dashboard') }}">Tổng quan</a>
+
       <a class="nav-link" href="{{ url_for('history_page') }}">Lịch sử</a>
-      <a class="nav-link" href="/drivers">Quản lý tài xế</a>
+
+      <a class="nav-link" href="{{ url_for('drivers_page') }}">Quản lý tài xế</a>
+
+      <a class="nav-link" href="{{ url_for('verification_page') }}">Xác thực tài xế</a>
     </nav>
     <div class="user-area">
       <span>{{ session.get('username', 'Quản trị viên') }}</span>
