@@ -6,7 +6,7 @@ import re
 import secrets
 import sqlite3
 import time
-from functools import wraps
+from services.auth_utils import login_required
 
 import cv2
 import face_recognition
@@ -113,16 +113,6 @@ def init_face_auth():
 init_face_auth()
 
 
-def login_required(func):
-    @wraps(func)
-    def wrapper(*args, **kwargs):
-        if "user_id" not in session:
-            if request.path.startswith("/api/"):
-                return jsonify({"success": False, "message": "Chưa đăng nhập."}), 401
-            return redirect(url_for("login"))
-        return func(*args, **kwargs)
-    return wrapper
-
 
 def json_error(message, status=400):
     return jsonify({"success": False, "message": message}), status
@@ -156,11 +146,14 @@ def cleanup_pending_faces():
 @app.route("/login", methods=["GET", "POST"])
 def login():
     if "user_id" in session:
-        return redirect(url_for("dashboard"))
+        return redirect(url_for("pages.dashboard"))
+
     error = None
+
     if request.method == "POST":
         username = request.form.get("username", "").strip()
         password = request.form.get("password", "")
+
         conn = sqlite3.connect(str(DATABASE), timeout=10)
         conn.row_factory = sqlite3.Row
         try:
@@ -170,13 +163,18 @@ def login():
             ).fetchone()
         finally:
             conn.close()
+
         if user and check_password_hash(user["password_hash"], password):
             session.clear()
             session["user_id"] = user["id"]
             session["username"] = user["username"]
-            return redirect(url_for("dashboard"))
+            return redirect(url_for("pages.dashboard"))
+
         error = "Tên đăng nhập hoặc mật khẩu không đúng."
+
     return render_template("login.html", error=error)
+
+
 
 
 @app.route("/logout", methods=["POST"])
@@ -184,34 +182,6 @@ def login():
 def logout():
     session.clear()
     return redirect(url_for("login"))
-
-
-@app.route("/")
-def home():
-    return redirect(url_for("dashboard" if "user_id" in session else "login"))
-
-
-@app.route("/dashboard")
-@login_required
-def dashboard():
-    return render_template("dashboard.html")
-
-
-@app.route("/history")
-@login_required
-def history_page():
-    return render_template("history.html")
-
-
-@app.route("/drivers")
-@login_required
-def drivers_page():
-    return render_template("drivers.html")
-
-@app.route("/verification")
-@login_required
-def verification_page():
-    return render_template("verification.html")
 
 
 @app.route("/api/face/pending")
@@ -903,6 +873,8 @@ def internal_error(_error):
         return json_error("Lỗi máy chủ nội bộ.", 500)
     return "Đã xảy ra lỗi máy chủ.", 500
 
+from routes.page_routes import page_bp
+app.register_blueprint(page_bp)
 
 if __name__ == "__main__":
     # Chỉ dùng debug=False trên Raspberry Pi; chạy qua mạng LAN theo nhu cầu.

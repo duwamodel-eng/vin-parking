@@ -10,18 +10,18 @@
 
 <body>
   <header class="topbar">
-    <a class="brand" href="{{ url_for('dashboard') }}">
+    <a class="brand" href="{{ url_for('pages.dashboard') }}">
       <span class="brand-icon small">VP</span>
       <span>Vin Parking<small>SMART PARKING SYSTEM</small></span>
     </a>
     <nav>
-      <a class="nav-link " href="{{ url_for('dashboard') }}">Tổng quan</a>
+      <a class="nav-link " href="{{ url_for('pages.dashboard') }}">Tổng quan</a>
 
-      <a class="nav-link" href="{{ url_for('history_page') }}">Lịch sử</a>
+      <a class="nav-link" href="{{ url_for('pages.history_page') }}">Lịch sử</a>
 
-      <a class="nav-link" href="{{ url_for('drivers_page') }}">Quản lý tài xế</a>
+      <a class="nav-link" href="{{ url_for('pages.drivers_page') }}">Quản lý tài xế</a>
 
-      <a class="nav-link" href="{{ url_for('verification_page') }}">Xác thực tài xế</a>
+      <a class="nav-link" href="{{ url_for('pages.verification_page') }}">Xác thực tài xế</a>
     </nav>
     <div class="user-area">
       <span>{{ session.get('username', 'Quản trị viên') }}</span>
@@ -83,7 +83,7 @@
           <h2>Sự kiện gần đây</h2>
           <p class="muted">Lịch sử quét thẻ RFID.</p>
         </div>
-        <a class="text-link" href="{{ url_for('history_page') }}">Xem toàn bộ →</a>
+        <a class="text-link" href="{{ url_for('pages.history_page') }}">Xem toàn bộ →</a>
       </div>
       <div class="table-wrap">
         <table>
