@@ -19,7 +19,7 @@
     <div class="alert">{{ error }}</div>
     {% endif %}
 
-    <form method="POST" action="{{ url_for('login') }}">
+    <form method="POST" action="{{ url_for('auth.login') }}">
       <label for="username">Tên đăng nhập</label>
       <input id="username" name="username" autocomplete="username" required autofocus>
 

@@ -8,9 +8,8 @@ page_bp = Blueprint("pages", __name__)
 @page_bp.route("/")
 def home():
     return redirect(
-    url_for("pages.dashboard" if "user_id" in session else "login")
+    url_for("pages.dashboard" if "user_id" in session else "auth.login")
 )
-
 
 @page_bp.route("/dashboard")
 @login_required

@@ -100,7 +100,7 @@
     <div class="user-area">
       <span>{{ session.get('username', 'Quản trị viên') }}</span>
 
-      <form method="POST" action="{{ url_for('logout') }}">
+      <form method="POST" action="{{ url_for('auth.logout') }}">
         <button class="btn secondary" type="submit">
           Đăng xuất
         </button>
@@ -271,21 +271,48 @@
 
 
         if (!data.pending) {
-          // Không ghi đè kết quả trong thời gian chờ tự reset.
-          if (resetTimer) {
-            return;
-          }
+          // Không ghi đè kết quả đang được hiển thị.
+          if (resetTimer) return;
 
           activeRequestId = null;
           lastRequestId = null;
           requestInfo.hidden = true;
           captureBtn.disabled = true;
-          statusText.textContent = "Đang chờ thẻ RFID...";
-          message.className = "verify-message";
-          message.textContent = "Chưa có yêu cầu xác thực.";
+
+          const latest = data.latest_status;
+          const nowSeconds = Date.now() / 1000;
+
+          // Chỉ hiển thị kết quả gần đây, tránh hiện lỗi cũ.
+          if (
+            latest &&
+            latest.state !== "PENDING" &&
+            latest.processed_at &&
+            nowSeconds - latest.processed_at <= 8
+          ) {
+            const state = latest.state;
+            const text = latest.message || "Yêu cầu đã kết thúc.";
+
+            statusText.textContent =
+              state === "ALLOW" ? "Đã xác thực" :
+                state === "EXPIRED" ? "Hết thời gian xác thực" :
+                  "Bị từ chối";
+
+            message.className =
+              "verify-message " +
+              (state === "ALLOW" ? "success" : "error");
+
+            message.textContent =
+              (state === "ALLOW" ? "✓ " : "✗ ") + text;
+
+            scheduleReset();
+          } else {
+            statusText.textContent = "Đang chờ thẻ RFID...";
+            message.className = "verify-message";
+            message.textContent = "Chưa có yêu cầu xác thực.";
+          }
+
           return;
         }
-
 
         activeRequestId = data.request_id;
         driverIdText.textContent = data.driver_id || "—";

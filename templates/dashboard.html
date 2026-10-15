@@ -25,7 +25,7 @@
     </nav>
     <div class="user-area">
       <span>{{ session.get('username', 'Quản trị viên') }}</span>
-      <form method="POST" action="{{ url_for('logout') }}">
+      <form method="POST" action="{{ url_for('auth.logout') }}">
         <button class="btn secondary" type="submit">Đăng xuất</button>
       </form>
     </div>

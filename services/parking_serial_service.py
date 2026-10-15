@@ -323,6 +323,22 @@ FACE_AUTH_TIMEOUT = 32.0
 FACE_AUTH_POLL_INTERVAL = 0.2
 
 
+def record_rfid_denied(conn, uid, message):
+    """Lưu sự kiện RFID bị từ chối để giao diện web hiển thị."""
+    now = time.time()
+    uid = (uid or "UNKNOWN").strip().upper()[:64]
+
+    conn.execute(
+        """
+        INSERT INTO face_auth_requests
+            (uid, driver_id, state, created_at, processed_at, message)
+        VALUES (?, NULL, 'DENY', ?, ?, ?)
+        """,
+        (uid, now, now, message),
+    )
+    conn.commit()
+    print(f"[RFID DENIED] UID={uid} | {message}")
+
 def create_face_auth_request(conn, uid, driver_id):
     """Tạo yêu cầu chờ xác thực khuôn mặt từ giao diện web."""
     now = time.time()
@@ -390,21 +406,30 @@ def wait_face_auth_result(conn, request_id):
     state = row["state"] if isinstance(row, sqlite3.Row) else row[0]
     return state
 
+
 def process_wroom_card(conn, ser, uid):
     uid = uid.strip().upper()
 
+    # 1. UID sai định dạng: từ chối, không mở cổng.
     if not is_valid_uid(uid):
-        print(f"[WROOM] Invalid UID: {uid}")
+        try:
+            record_rfid_denied(
+                conn, uid, "Thẻ RFID không hợp lệ, vui lòng quét lại."
+            )
+        except Exception as exc:
+            conn.rollback()
+            print(f"[RFID STATUS][ERROR] {exc}")
+
         send_wroom_result(ser, "ENTRY_DENIED")
         return
 
-    # Ưu tiên chế độ đăng ký RFID.
+    # 2. Ưu tiên chế độ đăng ký RFID.
+    # Tuyệt đối không tạo yêu cầu khuôn mặt hoặc mở barrier.
     if registration_is_active(conn):
         try:
             if enqueue_registration_uid(conn, uid):
                 send_wroom_result(ser, "REGISTERED")
             else:
-                # Cửa sổ đăng ký vừa hết hạn: từ chối an toàn.
                 save_history(conn, "ENTRY_DENIED", uid)
                 send_wroom_result(ser, "ENTRY_DENIED")
         except Exception as exc:
@@ -413,12 +438,22 @@ def process_wroom_card(conn, ser, uid):
             send_wroom_result(ser, "ENTRY_DENIED")
         return
 
-    # Bước 1: RFID phải thuộc tài xế ACTIVE có dữ liệu khuôn mặt.
+    # 3. Kiểm tra thẻ + tài xế ACTIVE + dữ liệu khuôn mặt.
     driver = get_entry_driver(conn, uid)
 
     if driver is None:
-        print(f"[AUTH] RFID không hợp lệ, tài xế không ACTIVE "
-              f"hoặc chưa có dữ liệu khuôn mặt: {uid}")
+        message = (
+            "Thẻ không hợp lệ hoặc tài xế chưa ACTIVE/"
+            "chưa đăng ký khuôn mặt. Vui lòng quét lại."
+        )
+        print(f"[AUTH] {message} UID={uid}")
+
+        try:
+            record_rfid_denied(conn, uid, message)
+        except Exception as exc:
+            conn.rollback()
+            print(f"[RFID STATUS][ERROR] {exc}")
+
         save_history(conn, "ENTRY_DENIED", uid)
         send_wroom_result(ser, "ENTRY_DENIED")
         return
@@ -429,11 +464,9 @@ def process_wroom_card(conn, ser, uid):
         else driver[0]
     )
 
-    # Bước 2: tạo yêu cầu để giao diện camera trên laptop xử lý.
+    # 4. Tạo yêu cầu xác thực khuôn mặt.
     try:
-        request_id = create_face_auth_request(
-            conn, uid, driver_id
-        )
+        request_id = create_face_auth_request(conn, uid, driver_id)
     except Exception as exc:
         conn.rollback()
         print(f"[FACE AUTH][ERROR] Không tạo được yêu cầu: {exc}")
@@ -441,7 +474,10 @@ def process_wroom_card(conn, ser, uid):
         send_wroom_result(ser, "ENTRY_DENIED")
         return
 
-    # Bước 3: chỉ chờ quyết định từ API xác thực khuôn mặt.
+    # 5. Báo ngay cho ESP32: thẻ hợp lệ, đang chờ khuôn mặt.
+    send_wroom_result(ser, "CARD_VALID")
+
+    # 6. Chỉ chấp nhận ALLOW. Mọi trạng thái khác đều đóng cổng.
     try:
         result = wait_face_auth_result(conn, request_id)
     except Exception as exc:
@@ -449,14 +485,17 @@ def process_wroom_card(conn, ser, uid):
         print(f"[FACE AUTH][ERROR] {exc}")
         result = "DENY"
 
-    # Bước 4: fail-closed — chỉ ALLOW mới được vào.
     if result == "ALLOW":
         save_history(conn, "ENTRY", uid)
         send_wroom_result(ser, "ENTRY_ALLOWED")
         print(f"[ACCESS GRANTED] UID={uid}")
+    elif result == "EXPIRED":
+        save_history(conn, "ENTRY_DENIED", uid)
+        send_wroom_result(ser, "FACE_TIMEOUT")
+        print(f"[ACCESS DENIED] UID={uid}, face timeout")
     else:
         save_history(conn, "ENTRY_DENIED", uid)
-        send_wroom_result(ser, "ENTRY_DENIED")
+        send_wroom_result(ser, "FACE_DENIED")
         print(f"[ACCESS DENIED] UID={uid}, result={result}")
 
 
