@@ -15,32 +15,39 @@ from services.auth_utils import login_required
 
 face_bp = Blueprint("face_api", __name__)
 
-
 @face_bp.route("/api/face/pending")
 @login_required
 def face_auth_pending():
+    gate = request.args.get("gate", "ENTRY").strip().upper()
+
+    if gate not in ("ENTRY", "EXIT"):
+        return json_error("Cổng xác thực không hợp lệ.", 400)
+
     conn = get_db()
     try:
         now = time.time()
 
-        # Hết hạn yêu cầu chờ quá 35 giây.
+        # Hết hạn yêu cầu PENDING theo đúng cổng.
         conn.execute("""
             UPDATE face_auth_requests
             SET state = 'EXPIRED',
                 processed_at = ?,
                 message = 'Hết thời gian xác thực'
-            WHERE state = 'PENDING' AND created_at < ?
-        """, (now, now - 35))
+            WHERE state = 'PENDING'
+              AND gate_type = ?
+              AND created_at < ?
+        """, (now, gate, now - 35))
         conn.commit()
 
-        # Trạng thái mới nhất để giao diện hiện cả lỗi RFID.
+        # Trạng thái gần nhất của đúng cổng.
         latest = conn.execute("""
             SELECT id, uid, driver_id, state, created_at,
                    processed_at, message
             FROM face_auth_requests
+            WHERE gate_type = ?
             ORDER BY id DESC
             LIMIT 1
-        """).fetchone()
+        """, (gate,)).fetchone()
 
         latest_status = None
         if latest:
@@ -54,15 +61,16 @@ def face_auth_pending():
                 "message": latest["message"],
             }
 
-        # Giữ nguyên cơ chế lấy yêu cầu đang chờ.
+        # Chỉ lấy yêu cầu đang chờ của đúng cổng.
         row = conn.execute("""
             SELECT q.id, q.uid, q.driver_id, d.full_name
             FROM face_auth_requests q
             LEFT JOIN drivers d ON d.driver_id = q.driver_id
             WHERE q.state = 'PENDING'
+              AND q.gate_type = ?
             ORDER BY q.id ASC
             LIMIT 1
-        """).fetchone()
+        """, (gate,)).fetchone()
 
         if not row:
             return jsonify({
@@ -78,11 +86,12 @@ def face_auth_pending():
             "driver_id": row["driver_id"],
             "full_name": row["full_name"],
             "uid": row["uid"],
+            "gate": gate,
             "latest_status": latest_status,
         })
+
     finally:
         conn.close()
-
 
 @face_bp.route("/api/face/verify", methods=["POST"])
 @login_required
@@ -95,6 +104,10 @@ def verify_driver_face():
         request_id = int(data.get("request_id"))
     except (TypeError, ValueError):
         return json_error("Mã yêu cầu xác thực không hợp lệ.")
+
+    gate = str(data.get("gate", "")).strip().upper()
+    if gate not in ("ENTRY", "EXIT"):
+        return json_error("Cổng xác thực không hợp lệ.", 400)
 
     image_data = data.get("image", "")
     if not isinstance(image_data, str):
@@ -111,13 +124,18 @@ def verify_driver_face():
     try:
         # Bước 1: Đọc yêu cầu, không giữ khóa ghi khi xử lý ảnh.
         req = conn.execute("""
-            SELECT id, uid, driver_id, state, created_at
+            SELECT id, uid, driver_id, state, created_at, gate_type
             FROM face_auth_requests
             WHERE id = ?
         """, (request_id,)).fetchone()
 
         if not req or req["state"] != "PENDING":
             return json_error("Yêu cầu không còn hiệu lực.", 409)
+
+        if req["gate_type"] != gate:
+            return json_error(
+                "Yêu cầu thuộc cổng khác, không thể xác thực.", 403
+            )
 
         if time.time() - req["created_at"] > 35:
             conn.execute("BEGIN IMMEDIATE")

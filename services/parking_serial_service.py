@@ -33,6 +33,7 @@ import serial
 S3_PORT = "/dev/ttyUSB0"
 WROOM_PORT = "/dev/ttyUSB1"
 BAUD_RATE = 115200
+s3_serial = None
 
 # Short timeout lets the WROOM worker respond promptly.
 SERIAL_TIMEOUT = 0.2
@@ -40,6 +41,16 @@ SERIAL_TIMEOUT = 0.2
 DB_PATH = "/home/admin/smart_parking/database/parking.db"
 
 db_lock = threading.Lock()
+
+# Bảo vệ việc ghi phản hồi lên ESP32-S3 khi có nhiều luồng.
+s3_write_lock = threading.Lock()
+
+# Chỉ xử lý một yêu cầu xác thực cổng ra tại một thời điểm.
+exit_auth_lock = threading.Lock()
+
+# Chỉ token được Pi cấp quyền mới được ghi lịch sử EXIT.
+authorized_exit_tokens = {}
+authorized_exit_tokens_lock = threading.Lock()
 
 # Preserve the current test cards from the old ESP32 firmware.
 # A registered card with an ACTIVE driver is also authorized.
@@ -148,6 +159,118 @@ def update_parking_slots(conn, p1, p2, p3, p4):
     occupied = [p1, p2, p3, p4].count(0)
     free_slots = [p1, p2, p3, p4].count(1)
 
+
+def process_exit_request(uid, token, ser):
+    """
+    Xác thực EXIT trong luồng riêng.
+    Luồng s3_worker vẫn tiếp tục đọc cảm biến IR.
+    """
+    uid = uid.strip().upper()
+    token = token.strip()
+
+    # Chỉ cho phép một yêu cầu xác thực EXIT cùng lúc.
+    if not exit_auth_lock.acquire(blocking=False):
+        print(f"[EXIT] Từ chối yêu cầu đồng thời UID={uid}")
+        send_s3_exit_result(ser, "EXIT_DENIED", uid, token)
+        return
+
+    conn = None
+    request_id = None
+
+    try:
+        conn = connect_database()
+
+        if not is_valid_uid(uid) or not token:
+            send_s3_exit_result(ser, "EXIT_DENIED", uid, token)
+            return
+
+        # Kiểm tra thẻ + tài xế ACTIVE + dữ liệu khuôn mặt.
+        driver = get_entry_driver(conn, uid)
+
+        if driver is None:
+            now = time.time()
+            conn.execute("""
+                INSERT INTO face_auth_requests
+                    (uid, driver_id, state, created_at,
+                     processed_at, message, gate_type)
+                VALUES (?, NULL, 'DENY', ?, ?, ?, 'EXIT')
+            """, (
+                uid, now, now,
+                "Thẻ không hợp lệ hoặc tài xế chưa ACTIVE/"
+                "chưa đăng ký khuôn mặt",
+            ))
+            conn.commit()
+
+            save_history(conn, "EXIT_DENIED", uid)
+            send_s3_exit_result(ser, "EXIT_DENIED", uid, token)
+            print(f"[EXIT DENIED] UID={uid}: thẻ/tài xế không hợp lệ")
+            return
+
+        driver_id = driver["driver_id"]
+
+        # Quan trọng: yêu cầu cổng ra phải có gate_type='EXIT'.
+        request_id = create_face_auth_request(
+            conn, uid, driver_id, gate_type="EXIT"
+        )
+
+        print(
+            f"[EXIT] Chờ nhận diện khuôn mặt: "
+            f"request_id={request_id}, UID={uid}, token={token}"
+        )
+
+        result = wait_face_auth_result(conn, request_id)
+
+        if result == "ALLOW":
+            # Đánh dấu token được phép trước khi gửi phản hồi.
+            with authorized_exit_tokens_lock:
+                authorized_exit_tokens[token] = uid
+
+            try:
+                send_s3_exit_result(ser, "EXIT_ALLOWED", uid, token)
+                print(f"[EXIT ALLOWED] UID={uid}, token={token}")
+            except Exception:
+                # Không giữ token nếu không gửi được phản hồi.
+                with authorized_exit_tokens_lock:
+                    authorized_exit_tokens.pop(token, None)
+                raise
+        else:
+            # DENY/EXPIRED đều không được mở barrier.
+            save_history(conn, "EXIT_DENIED", uid)
+            send_s3_exit_result(ser, "EXIT_DENIED", uid, token)
+            print(f"[EXIT DENIED] UID={uid}, result={result}")
+
+    except Exception as exc:
+        if conn is not None:
+            conn.rollback()
+
+        print(f"[EXIT][ERROR] UID={uid}: {exc}")
+
+        # Nếu đã tạo yêu cầu, cố gắng chuyển PENDING thành DENY.
+        if conn is not None and request_id is not None:
+            try:
+                now = time.time()
+                conn.execute("""
+                    UPDATE face_auth_requests
+                    SET state = 'DENY',
+                        processed_at = ?,
+                        message = 'Lỗi xử lý xác thực cổng ra'
+                    WHERE id = ? AND state = 'PENDING'
+                """, (now, request_id))
+                conn.commit()
+            except sqlite3.Error:
+                conn.rollback()
+
+        # Lỗi xử lý: luôn từ chối, tuyệt đối không cấp quyền.
+        try:
+            send_s3_exit_result(ser, "EXIT_DENIED", uid, token)
+        except Exception as send_exc:
+            print(f"[S3][ERROR] Không gửi được kết quả từ chối: {send_exc}")
+
+    finally:
+        if conn is not None:
+            conn.close()
+        exit_auth_lock.release()
+
 # ------------------------------------------------------------
 # ESP32-S3: exit events and parking sensors
 # ------------------------------------------------------------
@@ -158,6 +281,62 @@ def process_s3_line(conn, line):
         return
 
     command = line.upper()
+
+    # ESP32-S3: yêu cầu xác thực cổng ra.
+    if command.startswith("EXIT_REQUEST,"):
+        parts = line.split(",", 2)
+
+        if len(parts) != 3:
+            print(f"[S3] EXIT_REQUEST sai định dạng: {line}")
+            return
+
+        uid = parts[1].strip().upper()
+        token = parts[2].strip()
+
+        threading.Thread(
+            target=process_exit_request,
+            args=(uid, token, s3_serial),
+            name=f"ExitAuth-{token}",
+            daemon=True,
+        ).start()
+        return
+
+    # Chỉ ghi EXIT sau khi ESP32 báo đã hoàn tất đóng barrier.
+    if command.startswith("EXIT_COMPLETED,"):
+          parts = line.split(",", 2)
+
+          if len(parts) != 3:
+              print(f"[S3] EXIT_COMPLETED sai định dạng: {line}")
+              return
+
+          uid = parts[1].strip().upper()
+          token = parts[2].strip()
+
+          if not is_valid_uid(uid) or not token:
+              print(f"[S3] EXIT_COMPLETED không hợp lệ: {line}")
+              return
+
+          # Token phải được Pi cấp quyền và UID phải trùng khớp.
+          with authorized_exit_tokens_lock:
+              authorized_uid = authorized_exit_tokens.get(token)
+
+              if authorized_uid != uid:
+                  print(
+                      f"[S3] Từ chối EXIT_COMPLETED không có quyền: "
+                      f"UID={uid}, token={token}"
+                  )
+                  return
+
+              # Xóa token ngay để ngăn ghi EXIT lần thứ hai.
+              del authorized_exit_tokens[token]
+
+          save_history(conn, "EXIT", uid)
+          print(f"[EXIT COMPLETED] UID={uid}, token={token}")
+          return
+
+    if command == "EXIT_AUTH_TIMEOUT":
+        print("[S3] ESP32 hết thời gian chờ xác thực cổng ra")
+        return
 
     if command.startswith("PARKING,"):
         parts = line.split(",")
@@ -313,6 +492,21 @@ def send_wroom_result(ser, result):
     ser.flush()
     print(f"[WROOM -> ESP32] {message.strip()}")
 
+def send_s3_exit_result(ser, result, uid, token):
+    """Gửi phản hồi đúng UID và token mà ESP32-S3 đang chờ."""
+    if result not in ("EXIT_ALLOWED", "EXIT_DENIED"):
+        raise ValueError("Kết quả cổng ra không hợp lệ")
+
+    message = (
+        f"RESULT,{result},{uid.strip().upper()},{token}\n"
+    )
+
+    with s3_write_lock:
+        ser.write(message.encode("utf-8"))
+        ser.flush()
+
+    print(f"[S3 -> ESP32] {message.strip()}")
+
 FACE_AUTH_TIMEOUT = 30.0
 FACE_AUTH_POLL_INTERVAL = 0.2
 
@@ -333,27 +527,33 @@ def record_rfid_denied(conn, uid, message):
     conn.commit()
     print(f"[RFID DENIED] UID={uid} | {message}")
 
-def create_face_auth_request(conn, uid, driver_id):
-    """Tạo yêu cầu chờ xác thực khuôn mặt từ giao diện web."""
+def create_face_auth_request(conn, uid, driver_id, gate_type="ENTRY"):
+    """Tạo yêu cầu xác thực khuôn mặt cho đúng cổng."""
+    gate_type = str(gate_type).strip().upper()
+    if gate_type not in ("ENTRY", "EXIT"):
+        raise ValueError("gate_type không hợp lệ")
+
     now = time.time()
 
-    cursor = conn.execute(
-        """
+    cursor = conn.execute("""
         INSERT INTO face_auth_requests
-            (uid, driver_id, state, created_at, message)
-        VALUES (?, ?, 'PENDING', ?, 'Đang chờ xác thực khuôn mặt')
-        """,
-        (uid, driver_id, now)
-    )
+            (uid, driver_id, state, created_at, message, gate_type)
+        VALUES (?, ?, 'PENDING', ?, ?, ?)
+    """, (
+        uid.strip().upper(),
+        driver_id,
+        now,
+        "Đang chờ xác thực khuôn mặt",
+        gate_type,
+    ))
     conn.commit()
 
     request_id = cursor.lastrowid
     print(
-        f"[FACE AUTH] Request #{request_id}: "
+        f"[FACE AUTH][{gate_type}] Request #{request_id}: "
         f"UID={uid}, driver={driver_id}"
     )
     return request_id
-
 
 def wait_face_auth_result(conn, request_id):
     """Chờ web xác thực; quá hạn hoặc lỗi đều không cấp quyền."""
@@ -541,11 +741,15 @@ def s3_worker():
     try:
         print(f"[S3] Opening {S3_PORT}...")
 
+        global s3_serial
+
         ser = serial.Serial(
             port=S3_PORT,
             baudrate=BAUD_RATE,
-            timeout=SERIAL_TIMEOUT
+            timeout=SERIAL_TIMEOUT,
+            write_timeout=2,
         )
+        s3_serial = ser
 
         conn = connect_database()
         print(f"[S3] Connected: {S3_PORT}")
@@ -575,6 +779,7 @@ def s3_worker():
         print(f"[S3][FATAL] {exc}")
     finally:
         if ser is not None:
+            s3_serial = None
             ser.close()
         if conn is not None:
             conn.close()
