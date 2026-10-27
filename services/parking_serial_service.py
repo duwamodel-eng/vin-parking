@@ -148,12 +148,6 @@ def update_parking_slots(conn, p1, p2, p3, p4):
     occupied = [p1, p2, p3, p4].count(0)
     free_slots = [p1, p2, p3, p4].count(1)
 
-    print(
-        f"[PARKING] P1={p1} P2={p2} P3={p3} P4={p4} "
-        f"| occupied={occupied} free={free_slots}"
-    )
-
-
 # ------------------------------------------------------------
 # ESP32-S3: exit events and parking sensors
 # ------------------------------------------------------------
@@ -319,7 +313,7 @@ def send_wroom_result(ser, result):
     ser.flush()
     print(f"[WROOM -> ESP32] {message.strip()}")
 
-FACE_AUTH_TIMEOUT = 32.0
+FACE_AUTH_TIMEOUT = 30.0
 FACE_AUTH_POLL_INTERVAL = 0.2
 
 
@@ -565,8 +559,9 @@ def s3_worker():
             line = raw.decode("utf-8", errors="ignore").strip()
             if not line:
                 continue
-
-            print(f"[S3] {line}")
+ 
+            if not line.upper().startswith(("PARKING,", "[IR]")):
+                print(f"[S3] {line}")
 
             try:
                 process_s3_line(conn, line)

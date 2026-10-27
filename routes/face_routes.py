@@ -219,7 +219,73 @@ def verify_driver_face():
             )
 
         # Bước 4: Xác thực xong mới mở giao dịch ghi ngắn.
-        verified = distance < 0.45
+        # So sánh khuôn mặt hiện tại với các tài xế khác đã đăng ký.
+        other_distances = []
+
+        other_faces = conn.execute(
+            """
+            SELECT driver_id, encoding_json
+            FROM face_encodings
+            WHERE driver_id != ?
+            """,
+            (req["driver_id"],),
+        ).fetchall()
+
+        for other in other_faces:
+            try:
+                other_encoding = np.asarray(
+                    json.loads(other["encoding_json"]),
+                    dtype=np.float64,
+                )
+
+                if (
+                    other_encoding.shape != (128,)
+                    or not np.isfinite(other_encoding).all()
+                ):
+                    continue
+
+                other_distance = float(
+                    np.linalg.norm(encodings[0] - other_encoding)
+                )
+
+                other_distances.append(
+                    (other["driver_id"], other_distance)
+                )
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+
+        closest_other = (
+            min(other_distances, key=lambda item: item[1])
+            if other_distances else None
+        )
+
+        # Chỉ chấp nhận nếu đủ gần và phân biệt rõ với tài xế khác.
+        threshold = 0.45
+        margin = 0.05
+
+        verified = (
+            distance < threshold
+            and closest_other is not None
+            and distance + margin < closest_other[1]
+        )
+
+        current_app.logger.warning(
+            "[FACE VERIFY DEBUG] request_id=%s uid=%s driver_id=%s "
+            "distance=%.6f closest_other=%s threshold=%.2f "
+            "margin=%.2f verified=%s",
+            request_id,
+            req["uid"],
+            req["driver_id"],
+            distance,
+            (
+                f"{closest_other[0]}:{closest_other[1]:.6f}"
+                if closest_other else "NONE"
+            ),
+            threshold,
+            margin,
+            verified,
+        )
+
         state = "ALLOW" if verified else "DENY"
         message = "Xác thực thành công" if verified else "Khuôn mặt không khớp"
 
@@ -249,6 +315,7 @@ def verify_driver_face():
             """, (time.time(), request_id))
             conn.commit()
             return json_error("Yêu cầu đã hết hạn.", 409)
+            # ////////////////////////////////////////////////////////////
 
         # Xác nhận thẻ, tài xế và dữ liệu khuôn mặt vẫn như lúc kiểm tra.
         current_driver = conn.execute("""
