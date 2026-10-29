@@ -109,16 +109,13 @@ def verify_driver_face():
     if gate not in ("ENTRY", "EXIT"):
         return json_error("Cổng xác thực không hợp lệ.", 400)
 
-    image_data = data.get("image", "")
-    if not isinstance(image_data, str):
-        return json_error("Ảnh không hợp lệ.")
+    images = data.get("images")
 
-    match = re.fullmatch(
-        r"data:image/jpeg;base64,([A-Za-z0-9+/=]+)",
-        image_data,
-    )
-    if not match:
-        return json_error("Ảnh phải ở định dạng JPEG.")
+    if not isinstance(images, list) or len(images) != 5:
+        return json_error(
+            "Cần gửi đúng 5 khung hình để xác thực.",
+            400,
+        )    
 
     conn = get_db()
     try:
@@ -179,67 +176,99 @@ def verify_driver_face():
 
         original_encoding_json = driver["encoding_json"]
 
-        # Bước 3: Giải mã và nhận diện ảnh ngoài giao dịch ghi SQLite.
+        # Bước 3: Xử lý nhiều khung hình ngoài giao dịch ghi SQLite.
         try:
-            raw = base64.b64decode(match.group(1), validate=True)
-            if not raw or len(raw) > 5 * 1024 * 1024:
-                raise ValueError("Ảnh rỗng hoặc vượt quá 5 MB.")
-
-            array = np.frombuffer(raw, dtype=np.uint8)
-            bgr = cv2.imdecode(array, cv2.IMREAD_COLOR)
-            if bgr is None:
-                raise ValueError("Không đọc được ảnh JPEG.")
-
-            height, width = bgr.shape[:2]
-            if height < 1 or width < 1:
-                raise ValueError("Kích thước ảnh không hợp lệ.")
-
-            if max(height, width) > 1280:
-                scale = 1280 / max(height, width)
-                bgr = cv2.resize(
-                    bgr,
-                    (
-                        max(1, int(width * scale)),
-                        max(1, int(height * scale)),
-                    ),
-                )
-
-            rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-            locations = face_recognition.face_locations(rgb, model="hog")
-
-            if len(locations) != 1:
-                raise ValueError(
-                    f"Ảnh phải có đúng một khuôn mặt; "
-                    f"phát hiện {len(locations)}."
-                )
-
-            encodings = face_recognition.face_encodings(
-                rgb,
-                known_face_locations=locations,
-            )
-            if len(encodings) != 1 or not np.isfinite(encodings[0]).all():
-                raise ValueError("Không trích xuất được khuôn mặt.")
-
             known = np.asarray(
                 json.loads(original_encoding_json),
                 dtype=np.float64,
             )
+
             if known.shape != (128,) or not np.isfinite(known).all():
                 raise ValueError("Dữ liệu khuôn mặt đã lưu không hợp lệ.")
 
-            distance = float(np.linalg.norm(encodings[0] - known))
+            query_encodings = []
+
+            for image_data in images:
+                if not isinstance(image_data, str):
+                    continue
+
+                match = re.fullmatch(
+                    r"data:image/jpeg;base64,([A-Za-z0-9+/=]+)",
+                    image_data,
+                )
+                if not match:
+                    continue
+
+                try:
+                    raw = base64.b64decode(match.group(1), validate=True)
+
+                    if not raw or len(raw) > 5 * 1024 * 1024:
+                        continue
+
+                    array = np.frombuffer(raw, dtype=np.uint8)
+                    bgr = cv2.imdecode(array, cv2.IMREAD_COLOR)
+
+                    if bgr is None:
+                        continue
+
+                    height, width = bgr.shape[:2]
+                    if height < 1 or width < 1:
+                        continue
+
+                    if max(height, width) > 960:
+                        scale = 960 / max(height, width)
+                        bgr = cv2.resize(
+                            bgr,
+                            (
+                                max(1, int(width * scale)),
+                                max(1, int(height * scale)),
+                            ),
+                        )
+
+                    rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+
+                    locations = face_recognition.face_locations(
+                        rgb,
+                        model="hog",
+                    )
+
+                    if len(locations) != 1:
+                        continue
+
+                    found = face_recognition.face_encodings(
+                        rgb,
+                        known_face_locations=locations,
+                    )
+
+                    if len(found) != 1:
+                        continue
+
+                    encoding = np.asarray(found[0], dtype=np.float64)
+
+                    if (
+                        encoding.shape == (128,)
+                        and np.isfinite(encoding).all()
+                    ):
+                        query_encodings.append(encoding)
+
+                except (ValueError, TypeError, cv2.error):
+                    continue
+
+            if len(query_encodings) < 3:
+                return json_error(
+                    f"Chỉ nhận diện được {len(query_encodings)}/5 khung hình. "
+                    "Hãy nhìn thẳng camera, đủ sáng và chụp lại.",
+                    400,
+                )
 
         except (ValueError, TypeError, json.JSONDecodeError, cv2.error) as exc:
-            # Ảnh lỗi được chụp lại; không tự DENY yêu cầu còn hạn.
             return json_error(
-                f"Không xác thực được ảnh: {str(exc)[:180]} Hãy chụp lại.",
+                f"Không xử lý được ảnh: {str(exc)[:150]} Hãy chụp lại.",
                 400,
-            )
+            )            
 
         # Bước 4: Xác thực xong mới mở giao dịch ghi ngắn.
-        # So sánh khuôn mặt hiện tại với các tài xế khác đã đăng ký.
-        other_distances = []
-
+        # So sánh từng khung hình với tài xế mục tiêu và các tài xế khác.
         other_faces = conn.execute(
             """
             SELECT driver_id, encoding_json
@@ -249,6 +278,8 @@ def verify_driver_face():
             (req["driver_id"],),
         ).fetchall()
 
+        other_encodings = []
+
         for other in other_faces:
             try:
                 other_encoding = np.asarray(
@@ -257,52 +288,68 @@ def verify_driver_face():
                 )
 
                 if (
-                    other_encoding.shape != (128,)
-                    or not np.isfinite(other_encoding).all()
+                    other_encoding.shape == (128,)
+                    and np.isfinite(other_encoding).all()
                 ):
-                    continue
+                    other_encodings.append(
+                        (other["driver_id"], other_encoding)
+                    )
 
-                other_distance = float(
-                    np.linalg.norm(encodings[0] - other_encoding)
-                )
-
-                other_distances.append(
-                    (other["driver_id"], other_distance)
-                )
             except (TypeError, ValueError, json.JSONDecodeError):
                 continue
 
-        closest_other = (
-            min(other_distances, key=lambda item: item[1])
-            if other_distances else None
-        )
-
-        # Chỉ chấp nhận nếu đủ gần và phân biệt rõ với tài xế khác.
         threshold = 0.45
         margin = 0.05
 
-        verified = (
-            distance < threshold
-            and closest_other is not None
-            and distance + margin < closest_other[1]
+        frame_distances = []
+        matching_frames = 0
+
+        for query in query_encodings:
+            distance = float(np.linalg.norm(query - known))
+            frame_distances.append(distance)
+
+            if not other_encodings:
+                continue
+
+            closest_other_distance = min(
+                float(np.linalg.norm(query - other_encoding))
+                for _, other_encoding in other_encodings
+            )
+
+            if (
+                distance < threshold
+                and distance + margin < closest_other_distance
+            ):
+                matching_frames += 1
+
+        required_matches = max(
+            3,
+            int(np.ceil(0.6 * len(query_encodings))),
         )
 
+        verified = (
+            bool(other_encodings)
+            and matching_frames >= required_matches
+        )
+
+        median_distance = float(np.median(frame_distances))
+
         current_app.logger.warning(
-            "[FACE VERIFY DEBUG] request_id=%s uid=%s driver_id=%s "
-            "distance=%.6f closest_other=%s threshold=%.2f "
-            "margin=%.2f verified=%s",
+            "[FACE VERIFY MULTI] request_id=%s uid=%s driver_id=%s "
+            "valid_frames=%d matches=%d required=%d median_distance=%.6f "
+            "threshold=%.2f margin=%.2f verified=%s",
             request_id,
             req["uid"],
             req["driver_id"],
-            distance,
-            (
-                f"{closest_other[0]}:{closest_other[1]:.6f}"
-                if closest_other else "NONE"
-            ),
+            len(query_encodings),
+            matching_frames,
+            required_matches,
+            median_distance,
             threshold,
             margin,
             verified,
         )
+
 
         state = "ALLOW" if verified else "DENY"
         message = "Xác thực thành công" if verified else "Khuôn mặt không khớp"

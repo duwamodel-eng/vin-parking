@@ -79,68 +79,96 @@ def encode_driver_face():
     if not isinstance(data, dict):
         return json_error("Dữ liệu ảnh không hợp lệ.")
 
-    image_data = data.get("image", "")
-    if not isinstance(image_data, str):
-        return json_error("Ảnh không đúng định dạng JPEG.")
+    images = data.get("images")
+    if not isinstance(images, list) or not 5 <= len(images) <= 12:
+        return json_error("Cần gửi từ 5 đến 12 khung hình.")
 
-    match = re.fullmatch(
-        r"data:image/jpeg;base64,([A-Za-z0-9+/=]+)",
-        image_data,
-    )
-    if not match:
-        return json_error("Ảnh không đúng định dạng JPEG.")
+    encodings = []
 
-    try:
-        raw = base64.b64decode(match.group(1), validate=True)
-        if not raw or len(raw) > 5 * 1024 * 1024:
-            return json_error("Ảnh rỗng hoặc vượt quá 5 MB.")
+    for image_data in images:
+        if not isinstance(image_data, str):
+            continue
 
-        image_array = np.frombuffer(raw, dtype=np.uint8)
-        bgr = cv2.imdecode(image_array, cv2.IMREAD_COLOR)
-        if bgr is None:
-            return json_error("Không đọc được ảnh.")
-
-        height, width = bgr.shape[:2]
-        if max(height, width) > 1280:
-            scale = 1280 / max(height, width)
-            bgr = cv2.resize(
-                bgr,
-                (
-                    max(1, int(width * scale)),
-                    max(1, int(height * scale)),
-                ),
-            )
-
-        rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-        locations = face_recognition.face_locations(rgb, model="hog")
-        if len(locations) != 1:
-            return json_error(
-                f"Cần đúng một khuôn mặt trong ảnh. "
-                f"Hiện phát hiện: {len(locations)}."
-            )
-
-        encodings = face_recognition.face_encodings(
-            rgb,
-            known_face_locations=locations,
+        match = re.fullmatch(
+            r"data:image/jpeg;base64,([A-Za-z0-9+/=]+)",
+            image_data,
         )
-        if len(encodings) != 1 or not np.isfinite(encodings[0]).all():
-            return json_error("Không tạo được dữ liệu khuôn mặt hợp lệ.")
+        if not match:
+            continue
 
-        cleanup_pending_faces()
-        token = secrets.token_urlsafe(32)
-        PENDING_FACES[token] = {
-            "encoding": encodings[0].tolist(),
-            "created_at": time.time(),
-            "user_id": session["user_id"],
-        }
+        try:
+            raw = base64.b64decode(match.group(1), validate=True)
+            if not raw or len(raw) > 5 * 1024 * 1024:
+                continue
 
-        return jsonify({
-            "success": True,
-            "face_token": token,
-            "message": "Đã tạo dữ liệu khuôn mặt.",
-        })
-    except (ValueError, cv2.error):
-        return json_error("Ảnh không hợp lệ hoặc không thể xử lý.")
+            array = np.frombuffer(raw, dtype=np.uint8)
+            bgr = cv2.imdecode(array, cv2.IMREAD_COLOR)
+            if bgr is None:
+                continue
+
+            height, width = bgr.shape[:2]
+            if min(height, width) < 100:
+                continue
+
+            if max(height, width) > 1280:
+                scale = 1280 / max(height, width)
+                bgr = cv2.resize(
+                    bgr,
+                    (
+                        max(1, int(width * scale)),
+                        max(1, int(height * scale)),
+                    ),
+                )
+
+            rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+            locations = face_recognition.face_locations(
+                rgb, model="hog"
+            )
+
+            if len(locations) != 1:
+                continue
+
+            found = face_recognition.face_encodings(
+                rgb, known_face_locations=locations
+            )
+            if len(found) != 1:
+                continue
+
+            encoding = np.asarray(found[0], dtype=np.float64)
+            if encoding.shape == (128,) and np.isfinite(encoding).all():
+                encodings.append(encoding)
+
+        except (ValueError, TypeError, cv2.error):
+            continue
+
+    if len(encodings) < 5:
+        return json_error(
+            f"Chỉ có {len(encodings)} khung hình hợp lệ. "
+            "Hãy giữ mặt ổn định, đủ sáng và chụp lại."
+        )
+
+    # Tạo một vector đại diện từ các khung hình hợp lệ.
+    representative = np.mean(np.stack(encodings), axis=0)
+
+    if not np.isfinite(representative).all():
+        return json_error("Không tạo được dữ liệu khuôn mặt hợp lệ.")
+
+    cleanup_pending_faces()
+    token = secrets.token_urlsafe(32)
+
+    PENDING_FACES[token] = {
+        "encoding": representative.tolist(),
+        "samples": len(encodings),
+        "created_at": time.time(),
+        "user_id": session["user_id"],
+    }
+
+    return jsonify({
+        "success": True,
+        "face_token": token,
+        "samples": len(encodings),
+        "message": f"Đã xử lý {len(encodings)} khung hình khuôn mặt.",
+    })
 
 
 @driver_bp.route("/api/drivers/register", methods=["POST"])
@@ -232,6 +260,14 @@ def register_driver():
                 distance = float(
                     np.linalg.norm(new_encoding - known_encoding)
                 )
+
+                current_app.logger.warning(
+                    "[FACE REGISTER CHECK] new_driver=%s existing_driver=%s distance=%.6f threshold=0.42",
+                    driver_id,
+                    existing_driver_id,
+                    distance,
+                )
+
             except (TypeError, ValueError, json.JSONDecodeError):
                 continue
 
@@ -258,9 +294,13 @@ def register_driver():
             """
             INSERT INTO face_encodings
                 (driver_id, encoding_json, samples, updated_at)
-            VALUES (?, ?, 1, datetime('now', 'localtime'))
+            VALUES (?, ?, ?, datetime('now', 'localtime'))
             """,
-            (driver_id, json.dumps(encoding)),
+            (
+                driver_id,
+                json.dumps(encoding),
+                face.get("samples", 1),
+            ),
         )
 
         conn.commit()

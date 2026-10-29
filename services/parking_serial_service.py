@@ -2,6 +2,7 @@ import re
 import sqlite3
 import threading
 import time
+from collections import deque
 from datetime import datetime
 
 import serial
@@ -48,6 +49,10 @@ s3_write_lock = threading.Lock()
 # Chỉ xử lý một yêu cầu xác thực cổng ra tại một thời điểm.
 exit_auth_lock = threading.Lock()
 
+# Hàng đợi FIFO dùng chung cho xác thực khuôn mặt ENTRY và EXIT.
+face_queue = deque()
+face_queue_condition = threading.Condition()
+
 # Chỉ token được Pi cấp quyền mới được ghi lịch sử EXIT.
 authorized_exit_tokens = {}
 authorized_exit_tokens_lock = threading.Lock()
@@ -60,6 +65,50 @@ LEGACY_VALID_UIDS = {
     "FF:A7:08:E6",
 }
 
+def enqueue_face_ticket(gate, uid):
+    """Đăng ký thứ tự yêu cầu xác thực khuôn mặt."""
+    ticket = {
+        "gate": gate,
+        "uid": uid,
+        "created_at": time.monotonic(),
+    }
+
+    with face_queue_condition:
+        face_queue.append(ticket)
+        position = len(face_queue)
+        face_queue_condition.notify_all()
+
+    print(
+        f"[FACE QUEUE] {gate} UID={uid} "
+        f"position={position}"
+    )
+    return ticket
+
+
+def wait_for_face_turn(ticket):
+    """Chỉ yêu cầu đứng đầu hàng đợi mới được xác thực."""
+    with face_queue_condition:
+        while not face_queue or face_queue[0] is not ticket:
+            face_queue_condition.wait()
+
+
+def release_face_ticket(ticket):
+    """Giải phóng lượt và đánh thức yêu cầu tiếp theo."""
+    if ticket is None:
+        return
+
+    with face_queue_condition:
+        try:
+            face_queue.remove(ticket)
+        except ValueError:
+            pass
+
+        face_queue_condition.notify_all()
+
+    print(
+        f"[FACE QUEUE] Released "
+        f"{ticket['gate']} UID={ticket['uid']}"
+    )
 
 def get_current_time():
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -160,7 +209,7 @@ def update_parking_slots(conn, p1, p2, p3, p4):
     free_slots = [p1, p2, p3, p4].count(1)
 
 
-def process_exit_request(uid, token, ser):
+def process_exit_request(uid, token, ser, ticket):
     """
     Xác thực EXIT trong luồng riêng.
     Luồng s3_worker vẫn tiếp tục đọc cảm biến IR.
@@ -168,16 +217,11 @@ def process_exit_request(uid, token, ser):
     uid = uid.strip().upper()
     token = token.strip()
 
-    # Chỉ cho phép một yêu cầu xác thực EXIT cùng lúc.
-    if not exit_auth_lock.acquire(blocking=False):
-        print(f"[EXIT] Từ chối yêu cầu đồng thời UID={uid}")
-        send_s3_exit_result(ser, "EXIT_DENIED", uid, token)
-        return
-
     conn = None
     request_id = None
 
     try:
+        wait_for_face_turn(ticket)
         conn = connect_database()
 
         if not is_valid_uid(uid) or not token:
@@ -269,7 +313,7 @@ def process_exit_request(uid, token, ser):
     finally:
         if conn is not None:
             conn.close()
-        exit_auth_lock.release()
+        release_face_ticket(ticket)    
 
 # ------------------------------------------------------------
 # ESP32-S3: exit events and parking sensors
@@ -293,9 +337,17 @@ def process_s3_line(conn, line):
         uid = parts[1].strip().upper()
         token = parts[2].strip()
 
+        ticket = enqueue_face_ticket("EXIT", uid,)
+        try:
+            send_s3_exit_result(
+                s3_serial, "EXIT_QUEUED", uid, token
+            )
+        except Exception:
+            release_face_ticket(ticket)
+            raise
         threading.Thread(
             target=process_exit_request,
-            args=(uid, token, s3_serial),
+            args=(uid, token, s3_serial, ticket),
             name=f"ExitAuth-{token}",
             daemon=True,
         ).start()
@@ -494,7 +546,11 @@ def send_wroom_result(ser, result):
 
 def send_s3_exit_result(ser, result, uid, token):
     """Gửi phản hồi đúng UID và token mà ESP32-S3 đang chờ."""
-    if result not in ("EXIT_ALLOWED", "EXIT_DENIED"):
+    if result not in (
+        "EXIT_ALLOWED",
+        "EXIT_DENIED",
+        "EXIT_QUEUED",
+    ):
         raise ValueError("Kết quả cổng ra không hợp lệ")
 
     message = (
@@ -711,8 +767,24 @@ def process_wroom_line(conn, ser, line):
             send_wroom_result(ser, "ERROR")
             return
 
-        process_wroom_card(conn, ser, parts[1])
-        return
+        uid = parts[1].strip().upper()
+
+        # Chế độ đăng ký RFID không cần xếp hàng xác thực khuôn mặt.
+        if registration_is_active(conn):
+            process_wroom_card(conn, ser, uid)
+            return
+
+        # Ghi nhận thứ tự ngay khi Pi nhận thẻ.
+        ticket = enqueue_face_ticket("ENTRY", uid)
+
+        try:
+            send_wroom_result(ser, "QUEUED")
+            wait_for_face_turn(ticket)
+            process_wroom_card(conn, ser, uid)
+        finally:
+            release_face_ticket(ticket)
+
+        return        
 
     # Compatibility logging for old firmware messages.
     # These old messages arrive AFTER the old ESP32 opens the barrier.

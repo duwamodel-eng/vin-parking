@@ -131,8 +131,8 @@
 
   <main class="verify-container">
     <h1>Xác thực khuôn mặt tài xế</h1>
-    <p>Hai cổng được theo dõi độc lập. Chọn yêu cầu đúng cổng, kiểm tra thông tin tài xế, sau đó mở camera và chụp để
-      xác thực.</p>
+    <p>Hai cổng dùng chung camera và được xác thực lần lượt theo thứ tự yêu cầu đến. Chỉ chụp khuôn mặt khi yêu cầu đang
+      hiển thị ở đúng cổng.</p>
 
     <div class="verify-grid">
       <section class="verify-panel" data-gate="ENTRY">
@@ -352,29 +352,59 @@
 
     async function captureAndVerify(gate) {
       const state = gates[gate];
+
       if (captureBusy || !state.activeRequestId) return;
 
       if (!stream || !video.videoWidth || !video.videoHeight) {
         cameraMessage.className = "verify-message error";
-        cameraMessage.textContent = "Hãy mở camera và chờ hình ảnh xuất hiện.";
+        cameraMessage.textContent =
+          "Hãy mở camera và chờ hình ảnh xuất hiện.";
         return;
       }
 
       captureBusy = true;
       const requestId = state.activeRequestId;
       updateCaptureButtons();
-      setMessage(gate, "", "Đang gửi ảnh và xác thực...");
+
+      setMessage(
+        gate,
+        "",
+        "Đang thu 5 khung hình để xác thực... Hãy nhìn camera."
+      );
 
       try {
-        const maxSize = 960;
-        const scale = Math.min(1, maxSize / Math.max(video.videoWidth, video.videoHeight));
+        const maxSize = 720;
+        const scale = Math.min(
+          1,
+          maxSize / Math.max(video.videoWidth, video.videoHeight)
+        );
+
         canvas.width = Math.round(video.videoWidth * scale);
         canvas.height = Math.round(video.videoHeight * scale);
+
         const context = canvas.getContext("2d");
         if (!context) throw new Error("Không tạo được ảnh.");
 
-        context.drawImage(video, 0, 0, canvas.width, canvas.height);
-        const image = canvas.toDataURL("image/jpeg", 0.85);
+        const images = [];
+
+        for (let i = 0; i < 5; i++) {
+          if (!stream || !video.videoWidth || !video.videoHeight) {
+            throw new Error("Camera đã dừng. Hãy mở lại camera.");
+          }
+
+          context.drawImage(video, 0, 0, canvas.width, canvas.height);
+          images.push(canvas.toDataURL("image/jpeg", 0.75));
+
+          if (i < 4) {
+            await new Promise(resolve => setTimeout(resolve, 300));
+          }
+        }
+
+        setMessage(
+          gate,
+          "",
+          "Đang xử lý 5 khung hình trên Raspberry Pi..."
+        );
 
         const response = await fetch("/api/face/verify", {
           method: "POST",
@@ -383,28 +413,44 @@
           body: JSON.stringify({
             request_id: requestId,
             gate: gate,
-            image: image
+            images: images
           })
         });
+
         const data = await readResponse(response);
 
         if (data.verified === true) {
           el(gate, "-status").textContent = "Đã xác thực";
-          setMessage(gate, "success", "✓ HỢP LỆ — " + (data.message || "Xác thực thành công."));
+          setMessage(
+            gate,
+            "success",
+            "✓ HỢP LỆ — " +
+            (data.message || "Xác thực thành công.")
+          );
         } else {
           el(gate, "-status").textContent = "Bị từ chối";
-          setMessage(gate, "error", "✗ KHÔNG HỢP LỆ — " + (data.message || "Khuôn mặt không khớp."));
+          setMessage(
+            gate,
+            "error",
+            "✗ KHÔNG HỢP LỆ — " +
+            (data.message || "Khuôn mặt không khớp.")
+          );
         }
+
         state.activeRequestId = null;
         scheduleReset(gate);
+
       } catch (error) {
         setMessage(gate, "error", error.message);
+
         if (error.status === 409) {
           state.activeRequestId = null;
           state.lastRequestId = null;
           el(gate, "-info").hidden = true;
-          el(gate, "-status").textContent = "Yêu cầu hết hạn hoặc đã xử lý";
+          el(gate, "-status").textContent =
+            "Yêu cầu hết hạn hoặc đã xử lý";
         }
+
       } finally {
         captureBusy = false;
         updateCaptureButtons();
