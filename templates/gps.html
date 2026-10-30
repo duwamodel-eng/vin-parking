@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="vi">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Định vị GPS | Vin Parking</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <style>
+    #map {
+      width: 100%;
+      height: 520px;
+      border-radius: 12px;
+      border: 1px solid var(--border);
+      z-index: 1;
+    }
+
+    .gps-grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 16px;
+      margin-bottom: 22px;
+    }
+
+    @media (max-width: 800px) {
+      .gps-grid {
+        grid-template-columns: repeat(2, 1fr);
+      }
+    }
+  </style>
+</head>
+
+<body>
+  <header class="topbar">
+    <a class="brand" href="{{ url_for('pages.dashboard') }}">
+      <span class="brand-icon small">VP</span>
+      <span>Vin Parking<small>SMART PARKING SYSTEM</small></span>
+    </a>
+    <nav>
+      <a class="nav-link" href="{{ url_for('pages.dashboard') }}">Tổng quan</a>
+      <a class="nav-link" href="{{ url_for('pages.history_page') }}">Lịch sử</a>
+      <a class="nav-link active" href="{{ url_for('gps_api.gps_page') }}">Định vị GPS</a>
+      <a class="nav-link" href="{{ url_for('pages.drivers_page') }}">Quản lý tài xế</a>
+      <a class="nav-link" href="{{ url_for('pages.verification_page') }}">Xác thực tài xế</a>
+    </nav>
+    <div class="user-area">
+      <span>{{ session.get('username', 'Quản trị viên') }}</span>
+      <form method="POST" action="{{ url_for('auth.logout') }}">
+        <button class="btn secondary" type="submit">Đăng xuất</button>
+      </form>
+    </div>
+  </header>
+
+  <main class="container">
+    <section class="page-heading">
+      <div>
+        <p class="eyebrow">THEO DÕI VỊ TRÍ</p>
+        <h1>Định vị xe thời gian thực</h1>
+        <p class="muted">Theo dõi vị trí phương tiện qua module GPS & ESP32-S3.</p>
+      </div>
+      <div class="live-indicator"><span id="gps-pulse"></span> <span id="gps-status-text">Đang kết nối...</span></div>
+    </section>
+
+    <section class="gps-grid">
+      <article class="stat-card">
+        <p>Vĩ độ (Latitude)</p>
+        <div class="stat-number" style="font-size: 26px;" id="val-lat">—</div>
+        <span class="stat-note">Tọa độ Bắc</span>
+      </article>
+      <article class="stat-card">
+        <p>Kinh độ (Longitude)</p>
+        <div class="stat-number" style="font-size: 26px;" id="val-lng">—</div>
+        <span class="stat-note">Tọa độ Đông</span>
+      </article>
+      <article class="stat-card">
+        <p>Vận tốc di chuyển</p>
+        <div class="stat-number free-text" style="font-size: 26px;" id="val-speed">—</div>
+        <span class="stat-note">Đơn vị: km/h</span>
+      </article>
+      <article class="stat-card">
+        <p>Số vệ tinh kết nối</p>
+        <div class="stat-number" style="font-size: 26px;" id="val-sats">—</div>
+        <span class="stat-note">Chỉ số Fix (>= 4 vệ tinh)</span>
+      </article>
+    </section>
+
+    <section class="panel">
+      <div class="panel-heading">
+        <div>
+          <h2>Bản đồ hành trình</h2>
+          <p class="muted" id="last-sync">Chưa nhận được gói tin nào.</p>
+        </div>
+        <button class="btn secondary" type="button" onclick="centerVehicle()">Tập trung xe</button>
+      </div>
+      <div id="map"></div>
+    </section>
+  </main>
+
+  <script>
+
+    let map = L.map('map').setView([10.821558, 106.688031], 17);
+
+    L.tileLayer('https://mt1.google.com/vt/lyrs=m&x={x}&y={y}&z={z}', {
+      maxZoom: 20,
+      attribution: '© Google Maps'
+    }).addTo(map);
+
+    setTimeout(() => {
+      map.invalidateSize();
+    }, 500);
+
+    let vehicleMarker = L.marker([10.821558, 106.688031]).addTo(map)
+      .bindPopup("<b>Xe Vin Parking</b><br>Đang chờ tín hiệu...")
+      .openPopup();
+
+    let currentLat = 10.821558;
+    let currentLng = 106.688031;
+    let firstFix = false;
+
+    function centerVehicle() {
+      map.setView([currentLat, currentLng], 17);
+      vehicleMarker.openPopup();
+    }
+
+    async function fetchGPSData() {
+      try {
+        const res = await fetch('/api/gps/latest');
+        if (res.status === 401) {
+          window.location.href = '/login';
+          return;
+        }
+        const data = await res.json();
+
+        if (data.success && data.has_data) {
+          currentLat = data.latitude;
+          currentLng = data.longitude;
+
+          document.getElementById('val-lat').textContent = currentLat.toFixed(6);
+          document.getElementById('val-lng').textContent = currentLng.toFixed(6);
+          document.getElementById('val-speed').textContent = data.speed.toFixed(1) + ' km/h';
+          document.getElementById('val-sats').textContent = data.satellites;
+          document.getElementById('last-sync').textContent = 'Cập nhật lần cuối: ' + data.updated_at;
+          document.getElementById('gps-status-text').textContent = 'Đang truyền trực tiếp';
+
+          vehicleMarker.setLatLng([currentLat, currentLng])
+            .setPopupContent(`<b>Xe Vin Parking</b><br>Tốc độ: ${data.speed.toFixed(1)} km/h<br>Vệ tinh: ${data.satellites}<br>Thời gian: ${data.updated_at}`);
+
+          map.panTo([currentLat, currentLng]);
+
+          if (!firstFix) {
+            map.setView([currentLat, currentLng], 17);
+            firstFix = true;
+          }
+        } else {
+          document.getElementById('gps-status-text').textContent = 'Chưa có dữ liệu GPS';
+        }
+      } catch (err) {
+        document.getElementById('gps-status-text').textContent = 'Mất kết nối server';
+      }
+    }
+
+    fetchGPSData();
+    setInterval(fetchGPSData, 2000);
+  </script>
+</body>
+
+</html>

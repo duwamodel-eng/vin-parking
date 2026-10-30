@@ -2,6 +2,7 @@ import os
 import secrets
 import sqlite3
 import time
+from routes.gps_routes import gps_bp
 
 from flask import Flask, jsonify, request
 from werkzeug.security import generate_password_hash
@@ -181,6 +182,7 @@ app.register_blueprint(page_bp)
 app.register_blueprint(driver_bp)
 app.register_blueprint(face_bp)
 app.register_blueprint(parking_bp)
+app.register_blueprint(gps_bp)
 
 if __name__ == "__main__":
     # Chỉ dùng debug=False trên Raspberry Pi; chạy qua mạng LAN theo nhu cầu.

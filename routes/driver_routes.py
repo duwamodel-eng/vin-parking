@@ -147,11 +147,75 @@ def encode_driver_face():
             "Hãy giữ mặt ổn định, đủ sáng và chụp lại."
         )
 
-    # Tạo một vector đại diện từ các khung hình hợp lệ.
+    # Chẩn đoán độ nhất quán giữa các ảnh trong cùng lần đăng ký
+    encoding_array = np.stack(encodings)
+
+    distance_matrix = np.linalg.norm(
+        encoding_array[:, None, :] - encoding_array[None, :, :],
+        axis=2,
+    )
+
+    pairwise_distances = distance_matrix[
+        np.triu_indices(len(encodings), k=1)
+    ]
+
+    current_app.logger.warning(
+        "[FACE CAPTURE QUALITY] samples=%d "
+        "min=%.6f median=%.6f max=%.6f",
+        len(encodings),
+        float(np.min(pairwise_distances)),
+        float(np.median(pairwise_distances)),
+        float(np.max(pairwise_distances)),
+    )
+
+    # Tạo vector đại diện từ các khung hình hợp lệ
     representative = np.mean(np.stack(encodings), axis=0)
 
     if not np.isfinite(representative).all():
         return json_error("Không tạo được dữ liệu khuôn mặt hợp lệ.")
+
+    # Kiểm tra khoảng cách với các khuôn mặt đã đăng ký
+    check_conn = get_db()
+
+    try:
+        existing_faces = check_conn.execute("""
+            SELECT driver_id, encoding_json
+            FROM face_encodings
+            ORDER BY driver_id
+        """).fetchall()
+
+        for row in existing_faces:
+            try:
+                known_encoding = np.asarray(
+                    json.loads(row["encoding_json"]),
+                    dtype=np.float64,
+                )
+
+                if (
+                    known_encoding.shape != (128,)
+                    or not np.isfinite(known_encoding).all()
+                ):
+                    continue
+
+                distance = float(
+                    np.linalg.norm(representative - known_encoding)
+                )
+
+                current_app.logger.warning(
+                    "[FACE DIAGNOSTIC] existing_driver=%s "
+                    "distance=%.6f threshold=0.42",
+                    row["driver_id"],
+                    distance,
+                )
+
+            except (TypeError, ValueError, json.JSONDecodeError):
+                current_app.logger.exception(
+                    "Embedding không hợp lệ: %s",
+                    row["driver_id"],
+                )
+
+    finally:
+        check_conn.close()
 
     cleanup_pending_faces()
     token = secrets.token_urlsafe(32)
@@ -237,12 +301,21 @@ def register_driver():
                 409,
             )
 
-        # Chặn đăng ký lại khuôn mặt đã tồn tại.
+        # Kiểm tra và ghi nhận cảnh báo khuôn mặt gần giống.
+        # Không tự động từ chối vì khoảng cách embedding có thể
+        # nhỏ giữa hai người khác nhau.
+
         existing_faces = conn.execute(
-            "SELECT driver_id, encoding_json FROM face_encodings"
+            """
+            SELECT driver_id, encoding_json
+            FROM face_encodings
+            ORDER BY driver_id
+            """
         ).fetchall()
 
         new_encoding = np.asarray(encoding, dtype=np.float64)
+
+        similar_faces = []
 
         for existing_driver_id, encoding_json in existing_faces:
             try:
@@ -255,6 +328,10 @@ def register_driver():
                     known_encoding.shape != (128,)
                     or not np.isfinite(known_encoding).all()
                 ):
+                    current_app.logger.warning(
+                        "[FACE REGISTER] Bỏ qua embedding không hợp lệ: %s",
+                        existing_driver_id,
+                    )
                     continue
 
                 distance = float(
@@ -262,22 +339,33 @@ def register_driver():
                 )
 
                 current_app.logger.warning(
-                    "[FACE REGISTER CHECK] new_driver=%s existing_driver=%s distance=%.6f threshold=0.42",
+                    "[FACE REGISTER CHECK] "
+                    "new_driver=%s existing_driver=%s distance=%.6f",
                     driver_id,
                     existing_driver_id,
                     distance,
                 )
 
-            except (TypeError, ValueError, json.JSONDecodeError):
-                continue
+                if distance < 0.42:
+                    similar_faces.append(
+                        (existing_driver_id, distance)
+                    )
 
-            if distance < 0.42:
-                conn.rollback()
-                return json_error(
-                    f"Khuôn mặt có thể đã đăng ký cho tài xế "
-                    f"{existing_driver_id}. Vui lòng kiểm tra hồ sơ hiện có.",
-                    409,
+            except (TypeError, ValueError, json.JSONDecodeError):
+                current_app.logger.exception(
+                    "[FACE REGISTER] Không đọc được embedding: %s",
+                    existing_driver_id,
                 )
+
+        if similar_faces:
+            current_app.logger.warning(
+                "[FACE REGISTER REVIEW] "
+                "new_driver=%s similar_faces=%s "
+                "Registration is allowed; manual review recommended.",
+                driver_id,
+                similar_faces,
+            )
+
 
         conn.execute(
             """

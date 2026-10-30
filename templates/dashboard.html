@@ -22,6 +22,8 @@
       <a class="nav-link" href="{{ url_for('pages.drivers_page') }}">Quản lý tài xế</a>
 
       <a class="nav-link" href="{{ url_for('pages.verification_page') }}">Xác thực tài xế</a>
+
+      <a class="nav-link" href="{{ url_for('gps_api.gps_page') }}">Định vị GPS</a>
     </nav>
     <div class="user-area">
       <span>{{ session.get('username', 'Quản trị viên') }}</span>
