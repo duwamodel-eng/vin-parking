@@ -273,6 +273,12 @@
               required>
           </div>
           <div class="form-group">
+            <label for="vehiclePlate">Biển số xe *</label>
+            <select id="vehiclePlate" name="plate_number" required>
+              <option value="">Đang tải biển số...</option>
+            </select>
+          </div>
+          <div class="form-group">
             <label for="driverName">Họ và tên *</label>
             <input id="driverName" name="full_name" type="text" maxlength="100" placeholder="Nhập họ tên" required>
           </div>
@@ -297,18 +303,43 @@
 
     <section class="panel">
       <h2>Đăng ký khuôn mặt</h2>
-      <p>Camera laptop được truy cập từ trình duyệt. Đặt một khuôn mặt ở giữa khung hình, đủ sáng và chỉ có một người
-        trong ảnh.</p>
-      <video id="faceVideo" class="camera-video" autoplay playsinline muted></video>
-      <canvas id="faceCanvas" hidden></canvas>
-      <div class="actions">
-        <button type="button" id="openCameraBtn">Mở camera laptop</button>
-        <button type="button" id="captureFaceBtn" disabled>Chụp và xử lý khuôn mặt</button>
-        <button type="button" id="stopCameraBtn" disabled>Tắt camera</button>
-      </div>
-      <p id="faceMessage" class="message" role="status" aria-live="polite">Chưa xử lý khuôn mặt.</p>
-    </section>
 
+      <p>
+        Đăng ký khuôn mặt bằng 3 tư thế: FRONT, LEFT và RIGHT.
+        Mỗi tư thế chỉ cần chụp 1 ảnh rõ khuôn mặt.
+        Tổng cộng 3 ảnh cho một tài xế.
+      </p>
+
+      <p class="hint">
+        <strong>Hướng dẫn:</strong><br>
+        FRONT: Chụp 1 ảnh nhìn thẳng vào camera.
+        LEFT: Chụp 1 ảnh quay mặt sang trái.
+        RIGHT: Chụp 1 ảnh quay mặt sang phải.
+      </p>
+
+      <video id="faceVideo" class="camera-video" autoplay playsinline muted>
+      </video>
+
+      <canvas id="faceCanvas" hidden></canvas>
+
+      <div class="actions">
+        <button type="button" id="openCameraBtn">
+          Mở camera laptop
+        </button>
+
+        <button type="button" id="captureFaceBtn" disabled>
+          Chụp FRONT
+        </button>
+
+        <button type="button" id="stopCameraBtn" disabled>
+          Tắt camera
+        </button>
+      </div>
+
+      <p id="faceMessage" class="message" role="status" aria-live="polite">
+        Chưa xử lý khuôn mặt.
+      </p>
+    </section>
     <div class="actions">
       <a class="link-button" href="{{ url_for('pages.dashboard') }}">Về Dashboard</a>
       <button type="button" id="refreshBtn">Tải lại danh sách</button>
@@ -317,12 +348,17 @@
     <section class="panel">
       <h2>Danh sách tài xế</h2>
       <p id="listMessage" class="message" role="status" aria-live="polite">Đang tải danh sách...</p>
-      <p class="hint">Sửa chỉ cập nhật họ tên, số điện thoại và trạng thái. Xóa hồ sơ sẽ gỡ liên kết RFID và dữ liệu
-        khuôn mặt; lịch sử bãi xe được giữ lại.</p>
+      <p class="hint">
+        Hệ thống luôn hiển thị 4 biển số cố định.
+        Biển số chưa đăng ký sẽ để trống thông tin tài xế.
+        Sửa hồ sơ không thay đổi biển số.
+        Xóa hồ sơ sẽ giải phóng biển số để đăng ký lại.
+      </p>
       <div class="table-wrap">
         <table class="drivers-table">
           <thead>
             <tr>
+              <th>Biển số</th>
               <th>Mã tài xế</th>
               <th>Họ tên</th>
               <th>Số điện thoại</th>
@@ -335,7 +371,7 @@
           </thead>
           <tbody id="driversBody">
             <tr>
-              <td colspan="8">Đang tải...</td>
+              <td colspan="9">Đang tải...</td>
             </tr>
           </tbody>
         </table>
@@ -358,6 +394,10 @@
           <div class="form-group">
             <label for="editDriverId">Mã tài xế</label>
             <input id="editDriverId" type="text" readonly>
+          </div>
+          <div class="form-group">
+            <label for="editDriverPlate">Biển số xe</label>
+            <input id="editDriverPlate" type="text" readonly>
           </div>
           <div class="form-group">
             <label for="editDriverName">Họ và tên *</label>
@@ -397,6 +437,7 @@
 
     const driverForm = document.getElementById("driverForm");
     const driverIdInput = document.getElementById("driverId");
+    const vehiclePlateInput = document.getElementById("vehiclePlate");
     const driverNameInput = document.getElementById("driverName");
     const driverPhoneInput = document.getElementById("driverPhone");
     const driverUidInput = document.getElementById("driverUid");
@@ -416,6 +457,7 @@
     const editModalBackdrop = document.getElementById("editModalBackdrop");
     const editDriverForm = document.getElementById("editDriverForm");
     const editDriverIdInput = document.getElementById("editDriverId");
+    const editDriverPlateInput = document.getElementById("editDriverPlate");
     const editDriverNameInput = document.getElementById("editDriverName");
     const editDriverPhoneInput = document.getElementById("editDriverPhone");
     const editDriverUidInput = document.getElementById("editDriverUid");
@@ -432,6 +474,18 @@
     let registering = false;
     let capturingFace = false;
     let loadingDrivers = false;
+
+    // Thu thập ảnh theo 3 tư thế.
+    const FACE_POSES = ["FRONT", "LEFT", "RIGHT"];
+    const SAMPLES_PER_POSE = 1;
+
+    let currentPoseIndex = 0;
+
+    let poseImages = {
+      FRONT: [],
+      LEFT: [],
+      RIGHT: []
+    };
 
     function showRegisterMessage(message) { registerMessage.textContent = message; }
     function showFaceMessage(message) { faceMessage.textContent = message; }
@@ -484,35 +538,86 @@
 
     async function loadDrivers() {
       if (loadingDrivers) return;
+
       loadingDrivers = true;
       refreshBtn.disabled = true;
       listMessage.textContent = "Đang tải danh sách...";
       driversBody.replaceChildren();
 
       try {
-        const data = await apiRequest("/api/drivers", { method: "GET" });
-        if (!data.success) throw new Error(data.message || "Không tải được danh sách tài xế.");
-        const drivers = Array.isArray(data.drivers) ? data.drivers : [];
+        const data = await apiRequest("/api/drivers", {
+          method: "GET"
+        });
 
-        if (drivers.length === 0) {
-          const row = document.createElement("tr");
-          const cell = document.createElement("td");
-          cell.colSpan = 8;
-          cell.textContent = "Chưa có tài xế nào.";
-          row.appendChild(cell);
-          driversBody.appendChild(row);
+        if (!data.success) {
+          throw new Error(
+            data.message || "Không tải được danh sách tài xế."
+          );
+        }
+
+        const drivers = Array.isArray(data.drivers)
+          ? data.drivers
+          : [];
+
+        // Cập nhật dropdown: chỉ hiển thị biển số chưa được gán.
+        const availablePlates = Array.isArray(data.available_plates)
+          ? data.available_plates
+          : [];
+
+        const previousPlate = vehiclePlateInput.value;
+
+        vehiclePlateInput.replaceChildren();
+
+        const placeholder = document.createElement("option");
+        placeholder.value = "";
+        placeholder.textContent = availablePlates.length
+          ? "-- Chọn biển số chưa đăng ký --"
+          : "-- Không còn biển số trống --";
+
+        vehiclePlateInput.appendChild(placeholder);
+
+        for (const plate of availablePlates) {
+          const option = document.createElement("option");
+          option.value = plate;
+          option.textContent = plate;
+          vehiclePlateInput.appendChild(option);
+        }
+
+        if (availablePlates.includes(previousPlate)) {
+          vehiclePlateInput.value = previousPlate;
         } else {
-          for (const driver of drivers) {
-            const row = document.createElement("tr");
-            addCell(row, driver.driver_id);
-            addCell(row, driver.full_name);
-            addCell(row, driver.phone);
-            addCell(row, driver.uid);
-            addCell(row, driver.face_registered ? "Đã đăng ký" : "Chưa đăng ký");
-            addCell(row, driver.status);
-            addCell(row, driver.created_at);
+          vehiclePlateInput.value = "";
+        }
 
-            const actionCell = document.createElement("td");
+        // Hiển thị đủ các biển số lấy từ database.
+        for (const driver of drivers) {
+          const row = document.createElement("tr");
+
+          addCell(row, driver.plate_number);
+          addCell(row, driver.driver_id);
+          addCell(row, driver.full_name);
+          addCell(row, driver.phone);
+          addCell(row, driver.uid);
+
+          addCell(
+            row,
+            driver.registered
+              ? (driver.face_registered ? "Đã đăng ký" : "Chưa đăng ký")
+              : "—"
+          );
+
+          addCell(
+            row,
+            driver.registered
+              ? driver.status
+              : "Chưa đăng ký"
+          );
+
+          addCell(row, driver.created_at);
+
+          const actionCell = document.createElement("td");
+
+          if (driver.registered) {
             const actions = document.createElement("div");
             actions.className = "row-actions";
 
@@ -520,29 +625,62 @@
             editButton.type = "button";
             editButton.className = "edit-btn";
             editButton.textContent = "Sửa";
-            editButton.addEventListener("click", () => openEditModal(driver));
+            editButton.addEventListener(
+              "click",
+              () => openEditModal(driver)
+            );
 
             const deleteButton = document.createElement("button");
             deleteButton.type = "button";
             deleteButton.className = "delete-btn";
             deleteButton.textContent = "Xóa";
-            deleteButton.addEventListener("click", () => deleteDriver(driver));
+            deleteButton.addEventListener(
+              "click",
+              () => deleteDriver(driver)
+            );
 
             actions.append(editButton, deleteButton);
             actionCell.appendChild(actions);
-            row.appendChild(actionCell);
-            driversBody.appendChild(row);
+          } else {
+            actionCell.textContent = "Chưa có tài xế";
           }
+
+          row.appendChild(actionCell);
+          driversBody.appendChild(row);
         }
-        listMessage.textContent = `Tổng số tài xế: ${data.total ?? drivers.length}`;
+
+        if (drivers.length === 0) {
+          const row = document.createElement("tr");
+          const cell = document.createElement("td");
+          cell.colSpan = 9;
+          cell.textContent = "Database chưa có biển số xe.";
+          row.appendChild(cell);
+          driversBody.appendChild(row);
+        }
+
+        listMessage.textContent =
+          `Tổng số biển số: ${drivers.length} | ` +
+          `Đã đăng ký: ${data.registered_total ?? 0} | ` +
+          `Còn trống: ${availablePlates.length}`;
+
       } catch (error) {
         listMessage.textContent = error.message;
+
         const row = document.createElement("tr");
         const cell = document.createElement("td");
-        cell.colSpan = 8;
+        cell.colSpan = 9;
         cell.textContent = "Không tải được danh sách.";
+
         row.appendChild(cell);
         driversBody.appendChild(row);
+
+        vehiclePlateInput.replaceChildren();
+
+        const option = document.createElement("option");
+        option.value = "";
+        option.textContent = "-- Không tải được biển số --";
+        vehiclePlateInput.appendChild(option);
+
       } finally {
         loadingDrivers = false;
         refreshBtn.disabled = false;
@@ -558,6 +696,7 @@
     function openEditModal(driver) {
       editingDriverId = driver.driver_id;
       editDriverIdInput.value = driver.driver_id || "";
+      editDriverPlateInput.value = driver.plate_number || "";
       editDriverNameInput.value = driver.full_name || "";
       editDriverPhoneInput.value = driver.phone || "";
       editDriverUidInput.value = driver.uid || "";
@@ -704,8 +843,21 @@
           throw new Error("Trình duyệt không hỗ trợ camera hoặc trang chưa ở HTTPS/localhost.");
         }
         stopCamera();
+
         faceToken = null;
-        showFaceMessage("Đang mở camera...");
+        currentPoseIndex = 0;
+
+        poseImages = {
+          FRONT: [],
+          LEFT: [],
+          RIGHT: []
+        };
+
+        captureFaceBtn.textContent = "Chụp FRONT";
+
+        showFaceMessage(
+          "Đang mở camera. Chuẩn bị nhìn thẳng vào camera (FRONT)."
+        );
         cameraStream = await navigator.mediaDevices.getUserMedia({
           video: { facingMode: "user" },
           audio: false
@@ -734,14 +886,24 @@
         return;
       }
 
+      if (currentPoseIndex >= FACE_POSES.length) {
+        showFaceMessage("Đã hoàn tất thu thập 3 tư thế.");
+        return;
+      }
+
       capturingFace = true;
       captureFaceBtn.disabled = true;
       faceToken = null;
 
-      showFaceMessage("Đang thu 8 khung hình khuôn mặt... Hãy nhìn camera và giữ đầu ổn định.");
+      const pose = FACE_POSES[currentPoseIndex];
+
+      showFaceMessage(
+        `Đang chụp ${pose}: vui lòng giữ nguyên tư thế.`
+      );
 
       try {
         const maxSize = 960;
+
         const scale = Math.min(
           1,
           maxSize / Math.max(video.videoWidth, video.videoHeight)
@@ -751,26 +913,68 @@
         canvas.height = Math.round(video.videoHeight * scale);
 
         const context = canvas.getContext("2d");
-        if (!context) throw new Error("Không tạo được vùng xử lý ảnh.");
 
-        const images = [];
+        if (!context) {
+          throw new Error("Không tạo được vùng xử lý ảnh.");
+        }
 
-        for (let i = 0; i < 8; i++) {
+        // Chụp vào mảng tạm. Chỉ lưu khi đủ 4 ảnh.
+        const capturedImages = [];
+
+        for (let i = 0; i < SAMPLES_PER_POSE; i++) {
           if (!cameraStream || !video.videoWidth || !video.videoHeight) {
-            throw new Error("Camera đã dừng. Hãy mở camera và chụp lại.");
+            throw new Error("Camera đã dừng. Hãy mở lại camera.");
           }
 
-          context.drawImage(video, 0, 0, canvas.width, canvas.height);
-          images.push(canvas.toDataURL("image/jpeg", 0.80));
+          context.drawImage(
+            video,
+            0,
+            0,
+            canvas.width,
+            canvas.height
+          );
 
-          if (i < 7) {
-            await new Promise(resolve => setTimeout(resolve, 300));
+          capturedImages.push(
+            canvas.toDataURL("image/jpeg", 0.80)
+          );
+
+          if (i < SAMPLES_PER_POSE - 1) {
+            await new Promise(resolve => setTimeout(resolve, 600));
           }
         }
 
-        showFaceMessage("Đã thu ảnh. Raspberry Pi đang xử lý khuôn mặt...");
+        // Lưu 4 ảnh của tư thế hiện tại.
+        poseImages[pose] = capturedImages;
 
-        const result = await postJSON("/api/face/encode", { images });
+        currentPoseIndex++;
+
+        // Chưa đủ 3 tư thế: hướng dẫn người dùng chuyển tư thế.
+        if (currentPoseIndex < FACE_POSES.length) {
+          const nextPose = FACE_POSES[currentPoseIndex];
+
+          captureFaceBtn.textContent = `Chụp ${nextPose}`;
+
+          showFaceMessage(
+            `Đã thu thập ${pose}. ` +
+            `Bây giờ hãy ${nextPose === "LEFT"
+              ? "quay mặt nhẹ sang bên trái"
+              : "quay mặt nhẹ sang bên phải"
+            } rồi nhấn Chụp ${nextPose}.`
+          );
+
+          return;
+        }
+
+        // Đã đủ FRONT, LEFT, RIGHT.
+        showFaceMessage(
+          "Đã thu thập đủ ảnh. Raspberry Pi đang xử lý..."
+        );
+
+        captureFaceBtn.textContent = "Đang xử lý...";
+
+        const result = await postJSON("/api/face/encode", {
+          poses: poseImages
+        });
 
         if (!result.face_token) {
           throw new Error("Máy chủ không trả về face_token.");
@@ -779,17 +983,37 @@
         faceToken = result.face_token;
 
         showFaceMessage(
-          `Đã xử lý thành công ${result.samples || images.length} khung hình hợp lệ. Hãy hoàn tất đăng ký trong 5 phút.`
+          `Đã xử lý khuôn mặt thành công. ` +
+          `Số mẫu hợp lệ: ${result.samples || 3}. ` +
+          "Hãy hoàn tất đăng ký tài xế trong 5 phút."
         );
+
+        captureFaceBtn.textContent = "Đã xử lý khuôn mặt";
+
       } catch (error) {
         faceToken = null;
-        showFaceMessage("Không xử lý được khuôn mặt: " + error.message);
+
+        // Làm lại từ đầu nếu quá trình thu thập/xử lý thất bại.
+        currentPoseIndex = 0;
+
+        poseImages = {
+          FRONT: [],
+          LEFT: [],
+          RIGHT: []
+        };
+
+        captureFaceBtn.textContent = "Chụp FRONT";
+
+        showFaceMessage(
+          "Không xử lý được khuôn mặt: " + error.message +
+          " Hãy thực hiện lại từ tư thế FRONT."
+        );
+
       } finally {
         capturingFace = false;
         captureFaceBtn.disabled = !cameraStream;
       }
     });
-
 
     driverForm.addEventListener("submit", async event => {
       event.preventDefault();
@@ -799,6 +1023,7 @@
       }
 
       const driver_id = driverIdInput.value.trim().toUpperCase();
+      const plate_number = vehiclePlateInput.value.trim().toUpperCase();
       const full_name = driverNameInput.value.trim();
       const phone = driverPhoneInput.value.trim();
 
@@ -806,6 +1031,12 @@
         showRegisterMessage("Vui lòng nhập đầy đủ mã tài xế, họ tên và số điện thoại.");
         return;
       }
+
+      if (!plate_number) {
+        showRegisterMessage("Vui lòng chọn một biển số xe chưa đăng ký.");
+        return;
+      }
+
       if (!/^TX-[A-Z0-9]{6}$/.test(driver_id)) {
         showRegisterMessage("Mã tài xế không đúng định dạng. Hãy tạo mã mới.");
         return;
@@ -829,7 +1060,12 @@
 
       try {
         await postJSON("/api/drivers/register", {
-          driver_id, full_name, phone, uid: scannedUID, face_token: faceToken
+          driver_id,
+          plate_number,
+          full_name,
+          phone,
+          uid: scannedUID,
+          face_token: faceToken
         });
         showRegisterMessage("Đăng ký tài xế thành công. Danh sách đã được cập nhật.");
         driverForm.reset();

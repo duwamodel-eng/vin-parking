@@ -86,6 +86,38 @@
       border-radius: 12px;
     }
 
+    .plate-camera-box {
+      margin: 14px 0;
+      padding: 12px;
+      background: #f8fafc;
+      border: 1px solid #e2e8f0;
+      border-radius: 10px;
+    }
+
+    .plate-camera-box img {
+      display: block;
+      width: 100%;
+      aspect-ratio: 16 / 9;
+      object-fit: contain;
+      background: #111827;
+      border-radius: 8px;
+    }
+
+    .plate-camera-box img[hidden] {
+      display: none !important;
+    }
+
+    .plate-camera-title {
+      margin: 0 0 8px;
+      font-weight: 700;
+    }
+
+    .plate-camera-status {
+      margin: 8px 0 0;
+      color: #475569;
+      font-size: 14px;
+    }
+
     #camera {
       display: block;
       width: 100%;
@@ -138,6 +170,15 @@
       <section class="verify-panel" data-gate="ENTRY">
         <span class="gate-label">CỔNG VÀO · ENTRY</span>
         <h2>Xác thực vào bãi</h2>
+        <div class="plate-camera-box">
+          <p class="plate-camera-title">Camera biển số — ENTRY</p>
+
+          <img id="entry-plate-camera" alt="Ảnh chụp biển số cổng vào" hidden>
+
+          <p id="entry-plate-camera-status" class="plate-camera-status">
+            Camera đang tắt. Chỉ bật khi có yêu cầu RFID đến lượt.
+          </p>
+        </div>
         <p><strong>Trạng thái:</strong> <span id="entry-status">Đang kết nối...</span></p>
         <div class="request-info" id="entry-info" hidden>
           <p><strong>Mã tài xế:</strong> <span id="entry-driver-id">—</span></p>
@@ -154,6 +195,15 @@
       <section class="verify-panel" data-gate="EXIT">
         <span class="gate-label">CỔNG RA · EXIT</span>
         <h2>Xác thực ra bãi</h2>
+        <div class="plate-camera-box">
+          <p class="plate-camera-title">Camera biển số — EXIT</p>
+
+          <img id="exit-plate-camera" alt="Ảnh chụp biển số cổng ra" hidden>
+
+          <p id="exit-plate-camera-status" class="plate-camera-status">
+            Camera đang tắt. Chỉ bật khi có yêu cầu RFID đến lượt.
+          </p>
+        </div>
         <p><strong>Trạng thái:</strong> <span id="exit-status">Đang kết nối...</span></p>
         <div class="request-info" id="exit-info" hidden>
           <p><strong>Mã tài xế:</strong> <span id="exit-driver-id">—</span></p>
@@ -182,6 +232,7 @@
   </main>
 
   <script>
+
     "use strict";
 
     const video = document.getElementById("camera");
@@ -189,18 +240,102 @@
     const openCameraBtn = document.getElementById("openCameraBtn");
     const stopCameraBtn = document.getElementById("stopCameraBtn");
     const cameraMessage = document.getElementById("camera-message");
+    const plateCameraImages = [
+      {
+        gate: "ENTRY",
+        image: document.getElementById("entry-plate-camera"),
+        status: document.getElementById("entry-plate-camera-status")
+      },
+      {
+        gate: "EXIT",
+        image: document.getElementById("exit-plate-camera"),
+        status: document.getElementById("exit-plate-camera-status")
+      }
+    ];
+
+    plateCameraImages.forEach(camera => {
+      camera.image.addEventListener("load", () => {
+        camera.status.textContent =
+          "Đã nhận hình ảnh camera " + camera.gate;
+        camera.status.style.color = "#15803d";
+      });
+
+      camera.image.addEventListener("error", () => {
+        camera.status.textContent =
+          "Không nhận được hình ảnh camera " + camera.gate;
+        camera.status.style.color = "#dc2626";
+      });
+    });
 
     let stream = null;
     let captureBusy = false;
 
+    function showPlatePreview(gate, requestId) {
+      const camera = plateCameraImages.find(
+        item => item.gate === gate
+      );
+
+      if (!camera) return;
+
+      const requestKey = String(requestId);
+
+      camera.image.hidden = false;
+
+      // Không tạo lại kết nối MJPEG ở mỗi lần polling.
+      if (camera.image.dataset.requestId !== requestKey) {
+        camera.image.dataset.requestId = requestKey;
+
+        camera.image.src =
+          "/api/plate/stream/" +
+          gate +
+          "/" +
+          encodeURIComponent(requestKey) +
+          "?t=" +
+          Date.now();
+      }
+
+      camera.status.textContent =
+        "Đang phát trực tiếp camera " + gate + "...";
+
+      camera.status.style.color = "#2563eb";
+    }
+
+
+    function hidePlatePreview(gate) {
+      const camera = plateCameraImages.find(
+        item => item.gate === gate
+      );
+
+      if (!camera) return;
+
+      camera.image.hidden = true;
+
+      // Bỏ src để đóng kết nối MJPEG.
+      camera.image.removeAttribute("src");
+      delete camera.image.dataset.requestId;
+
+      camera.status.textContent =
+        "Camera đang tắt. Chỉ bật khi có yêu cầu RFID đến lượt.";
+
+      camera.status.style.color = "#475569";
+    }
+
     const gates = {
       ENTRY: {
-        key: "entry", activeRequestId: null, lastRequestId: null,
-        polling: false, resetTimer: null
+        key: "entry",
+        activeRequestId: null,
+        lastRequestId: null,
+        plateAllowedRequestId: null,
+        polling: false,
+        resetTimer: null
       },
       EXIT: {
-        key: "exit", activeRequestId: null, lastRequestId: null,
-        polling: false, resetTimer: null
+        key: "exit",
+        activeRequestId: null,
+        lastRequestId: null,
+        plateAllowedRequestId: null,
+        polling: false,
+        resetTimer: null
       }
     };
 
@@ -216,57 +351,82 @@
 
     function scheduleReset(gate) {
       const state = gates[gate];
+
       clearTimeout(state.resetTimer);
+
       state.resetTimer = setTimeout(() => {
         state.resetTimer = null;
         state.activeRequestId = null;
         state.lastRequestId = null;
+        state.plateAllowedRequestId = null;
+        hidePlatePreview(gate);
+
         el(gate, "-info").hidden = true;
         el(gate, "-capture").disabled = true;
         el(gate, "-status").textContent = "Đang chờ thẻ RFID...";
+
         setMessage(gate, "", "Đang chờ yêu cầu xác thực mới.");
+
+        updateCaptureButtons();
       }, 5000);
     }
 
     async function readResponse(response) {
       let data;
+
       try {
         data = await response.json();
       } catch {
         throw new Error("Máy chủ không trả về JSON hợp lệ.");
       }
+
       if (response.status === 401) {
         location.href = "/login";
         throw new Error("Phiên đăng nhập đã hết hạn.");
       }
+
       if (!response.ok || data.success === false) {
         const error = new Error(data.message || "Yêu cầu thất bại.");
         error.status = response.status;
         throw error;
       }
+
       return data;
     }
 
     async function openCamera() {
       try {
         if (!navigator.mediaDevices?.getUserMedia) {
-          throw new Error("Trình duyệt cần HTTPS hoặc localhost để truy cập camera.");
+          throw new Error(
+            "Trình duyệt cần HTTPS hoặc localhost để truy cập camera."
+          );
         }
+
         stopCamera();
+
         stream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: "user" }, audio: false
+          video: { facingMode: "user" },
+          audio: false
         });
+
         video.srcObject = stream;
         await video.play();
+
         openCameraBtn.disabled = true;
         stopCameraBtn.disabled = false;
+
         cameraMessage.className = "verify-message success";
-        cameraMessage.textContent = "Camera đã mở. Đặt một khuôn mặt ở giữa khung hình, đủ sáng.";
+        cameraMessage.textContent =
+          "Camera đã mở. Đặt một khuôn mặt ở giữa khung hình, đủ sáng.";
+
         updateCaptureButtons();
+
       } catch (error) {
         stopCamera();
+
         cameraMessage.className = "verify-message error";
-        cameraMessage.textContent = "Không mở được camera: " + error.message;
+        cameraMessage.textContent =
+          "Không mở được camera: " + error.message;
       }
     }
 
@@ -275,76 +435,187 @@
         stream.getTracks().forEach(track => track.stop());
         stream = null;
       }
+
       video.srcObject = null;
+
       openCameraBtn.disabled = false;
       stopCameraBtn.disabled = true;
+
       updateCaptureButtons();
     }
 
     function updateCaptureButtons() {
       for (const gate of ["ENTRY", "EXIT"]) {
-        el(gate, "-capture").disabled =
-          !stream || !gates[gate].activeRequestId || captureBusy;
+        const state = gates[gate];
+        const button = el(gate, "-capture");
+
+        const platePassed =
+          state.plateAllowedRequestId === state.activeRequestId;
+
+        button.textContent = platePassed
+          ? "Xác thực khuôn mặt " + (gate === "ENTRY" ? "CỔNG VÀO" : "CỔNG RA")
+          : "Chụp biển số " + (gate === "ENTRY" ? "CỔNG VÀO" : "CỔNG RA");
+
+        button.disabled =
+          !state.activeRequestId ||
+          captureBusy ||
+          (platePassed && (
+            !stream ||
+            !video.videoWidth ||
+            !video.videoHeight
+          ));
       }
     }
 
     async function pollGate(gate) {
       const state = gates[gate];
+
       if (state.polling) return;
+
       state.polling = true;
 
       try {
-        const response = await fetch("/api/face/pending?gate=" + gate, {
-          credentials: "same-origin", cache: "no-store"
-        });
+        const response = await fetch(
+          "/api/face/pending?gate=" + gate,
+          {
+            credentials: "same-origin",
+            cache: "no-store"
+          }
+        );
+
         const data = await readResponse(response);
 
-        if (state.resetTimer && data.pending) {
-          clearTimeout(state.resetTimer);
-          state.resetTimer = null;
-        }
-
-        if (data.pending) {
-          state.activeRequestId = data.request_id;
-          el(gate, "-driver-id").textContent = data.driver_id || "—";
-          el(gate, "-driver-name").textContent = data.full_name || "—";
-          el(gate, "-uid").textContent = data.uid || "—";
-          el(gate, "-request-id").textContent = data.request_id;
-          el(gate, "-info").hidden = false;
-          el(gate, "-status").textContent = "Có yêu cầu xác thực";
-
-          if (state.lastRequestId !== data.request_id) {
-            state.lastRequestId = data.request_id;
-            setMessage(gate, "", "Có yêu cầu mới. Kiểm tra đúng cổng rồi bấm nút xác thực.");
+        // Cổng này không đứng đầu FIFO chung.
+        if (data.waiting === true) {
+          if (state.resetTimer) {
+            clearTimeout(state.resetTimer);
+            state.resetTimer = null;
           }
+
+          state.activeRequestId = null;
+          state.lastRequestId = null;
+          state.plateAllowedRequestId = null;
+
+          el(gate, "-info").hidden = true;
+          el(gate, "-capture").disabled = true;
+          el(gate, "-status").textContent = "Đang chờ FIFO chung";
+
+          setMessage(
+            gate,
+            "",
+            "Đang chờ cổng " +
+            data.queue_head_gate +
+            " xử lý yêu cầu #" +
+            data.queue_head_request_id +
+            " trước."
+          );
+
           updateCaptureButtons();
           return;
         }
 
+        // Yêu cầu thuộc cổng này và đang đứng đầu hàng.
+        if (data.pending === true) {
+          if (state.resetTimer) {
+            clearTimeout(state.resetTimer);
+            state.resetTimer = null;
+          }
+
+          if (state.activeRequestId !== data.request_id) {
+            state.plateAllowedRequestId = null;
+          }
+
+          state.activeRequestId = data.request_id;
+          showPlatePreview(gate, data.request_id);
+
+          el(gate, "-driver-id").textContent =
+            data.driver_id || "—";
+
+          el(gate, "-driver-name").textContent =
+            data.full_name || "—";
+
+          el(gate, "-uid").textContent =
+            data.uid || "—";
+
+          el(gate, "-request-id").textContent =
+            data.request_id;
+
+          el(gate, "-info").hidden = false;
+          el(gate, "-status").textContent =
+            "Đến lượt xác thực";
+
+          if (state.lastRequestId !== data.request_id) {
+            state.lastRequestId = data.request_id;
+
+            setMessage(
+              gate,
+              "",
+              "Yêu cầu đang đứng đầu FIFO chung. " +
+              "Kiểm tra đúng tài xế rồi bấm nút xác thực."
+            );
+          }
+
+          updateCaptureButtons();
+          return;
+        }
+
+        // Không có yêu cầu PENDING ở cổng này.
         state.activeRequestId = null;
+        state.plateAllowedRequestId = null;
+        hidePlatePreview(gate);
         el(gate, "-info").hidden = true;
         el(gate, "-capture").disabled = true;
 
-        if (state.resetTimer) return;
+        if (state.resetTimer) {
+          updateCaptureButtons();
+          return;
+        }
 
         const latest = data.latest_status;
         const now = Date.now() / 1000;
-        if (latest && latest.state !== "PENDING" && latest.processed_at &&
-          now - latest.processed_at <= 8) {
+
+        if (
+          latest &&
+          latest.state !== "PENDING" &&
+          latest.processed_at &&
+          now - latest.processed_at <= 8
+        ) {
           const allowed = latest.state === "ALLOW";
           const expired = latest.state === "EXPIRED";
-          el(gate, "-status").textContent = allowed ? "Đã xác thực" :
-            (expired ? "Hết thời gian" : "Bị từ chối");
-          setMessage(gate, allowed ? "success" : "error",
-            (allowed ? "✓ " : "✗ ") + (latest.message || "Yêu cầu đã kết thúc."));
+
+          el(gate, "-status").textContent =
+            allowed
+              ? "Đã xác thực"
+              : (expired ? "Hết thời gian" : "Bị từ chối");
+
+          setMessage(
+            gate,
+            allowed ? "success" : "error",
+            (allowed ? "✓ " : "✗ ") +
+            (latest.message || "Yêu cầu đã kết thúc.")
+          );
+
           scheduleReset(gate);
+
         } else {
-          el(gate, "-status").textContent = "Đang chờ thẻ RFID...";
-          setMessage(gate, "", "Chưa có yêu cầu xác thực.");
+          state.lastRequestId = null;
+
+          el(gate, "-status").textContent =
+            "Đang chờ thẻ RFID...";
+
+          setMessage(
+            gate,
+            "",
+            "Chưa có yêu cầu xác thực."
+          );
         }
+
+        updateCaptureButtons();
+
       } catch (error) {
         el(gate, "-status").textContent = "Lỗi kết nối";
         setMessage(gate, "error", error.message);
+
       } finally {
         state.polling = false;
       }
@@ -355,25 +626,139 @@
 
       if (captureBusy || !state.activeRequestId) return;
 
+      const requestId = state.activeRequestId;
+
+      // GIAI ĐOẠN 1: XÁC THỰC BIỂN SỐ
+      // Chưa có kết quả ALLOW của đúng request_id thì chỉ chụp biển số.
+      if (state.plateAllowedRequestId !== requestId) {
+        captureBusy = true;
+        updateCaptureButtons();
+
+        const plateStatus = document.getElementById(
+          gate.toLowerCase() + "-plate-camera-status"
+        );
+
+        plateStatus.textContent =
+          "Đang bật camera " + gate + " và nhận diện biển số...";
+
+        plateStatus.style.color = "#2563eb";
+
+        setMessage(
+          gate,
+          "",
+          "Đang chụp biển số. Vui lòng giữ xe ở đúng vị trí."
+        );
+
+        try {
+          const response = await fetch("/api/plate/capture", {
+            method: "POST",
+            credentials: "same-origin",
+            headers: {
+              "Content-Type": "application/json"
+            },
+            body: JSON.stringify({
+              request_id: requestId,
+              gate: gate
+            })
+          });
+
+          const data = await readResponse(response);
+
+          // API trả success=true cả khi biển số bị DENY.
+          if (data.plate_allowed !== true) {
+            state.plateAllowedRequestId = null;
+
+            plateStatus.textContent =
+              data.message || "Biển số chưa hợp lệ. Hãy chụp lại.";
+
+            plateStatus.style.color = "#dc2626";
+
+            setMessage(
+              gate,
+              "error",
+              "✗ BIỂN SỐ KHÔNG ĐẠT — " +
+              (data.message || "Vui lòng kiểm tra vị trí xe và chụp lại.")
+            );
+
+            return;
+          }
+
+          // Chỉ ghi nhận kết quả biển số cho đúng yêu cầu hiện tại.
+          if (state.activeRequestId !== requestId) {
+            throw new Error("Yêu cầu RFID đã thay đổi. Vui lòng kiểm tra lại.");
+          }
+
+          state.plateAllowedRequestId = requestId;
+
+          plateStatus.textContent =
+            "✓ Biển số: " + data.detected_plate +
+            " — Khớp với tài xế.";
+
+          plateStatus.style.color = "#15803d";
+
+          setMessage(
+            gate,
+            "success",
+            "✓ BIỂN SỐ HỢP LỆ — " +
+            data.detected_plate +
+            ". Tiếp theo, mở camera khuôn mặt rồi bấm nút xác thực."
+          );
+
+          return;
+
+        } catch (error) {
+          setMessage(gate, "error", error.message);
+
+          if (error.status === 409) {
+            state.activeRequestId = null;
+            state.lastRequestId = null;
+            state.plateAllowedRequestId = null;
+
+            el(gate, "-info").hidden = true;
+            el(gate, "-status").textContent =
+              "Yêu cầu không còn lượt xác thực";
+          }
+
+          return;
+
+        } finally {
+          captureBusy = false;
+          updateCaptureButtons();
+
+          pollGate("ENTRY");
+          pollGate("EXIT");
+        }
+      }
+
+      // GIAI ĐOẠN 2: XÁC THỰC KHUÔN MẶT
+      // Chỉ chạy nếu đúng request_id đã được xác thực biển số.
+      if (
+        state.plateAllowedRequestId !== requestId ||
+        state.activeRequestId !== requestId
+      ) {
+        return;
+      }
+
       if (!stream || !video.videoWidth || !video.videoHeight) {
         cameraMessage.className = "verify-message error";
         cameraMessage.textContent =
-          "Hãy mở camera và chờ hình ảnh xuất hiện.";
+          "Biển số đã hợp lệ. Hãy mở camera khuôn mặt trước.";
+
         return;
       }
 
       captureBusy = true;
-      const requestId = state.activeRequestId;
       updateCaptureButtons();
 
       setMessage(
         gate,
         "",
-        "Đang thu 5 khung hình để xác thực... Hãy nhìn camera."
+        "Biển số đã hợp lệ. Đang thu 5 khung hình khuôn mặt..."
       );
 
       try {
         const maxSize = 720;
+
         const scale = Math.min(
           1,
           maxSize / Math.max(video.videoWidth, video.videoHeight)
@@ -383,7 +768,10 @@
         canvas.height = Math.round(video.videoHeight * scale);
 
         const context = canvas.getContext("2d");
-        if (!context) throw new Error("Không tạo được ảnh.");
+
+        if (!context) {
+          throw new Error("Không tạo được ảnh.");
+        }
 
         const images = [];
 
@@ -392,7 +780,14 @@
             throw new Error("Camera đã dừng. Hãy mở lại camera.");
           }
 
-          context.drawImage(video, 0, 0, canvas.width, canvas.height);
+          context.drawImage(
+            video,
+            0,
+            0,
+            canvas.width,
+            canvas.height
+          );
+
           images.push(canvas.toDataURL("image/jpeg", 0.75));
 
           if (i < 4) {
@@ -400,16 +795,26 @@
           }
         }
 
+        // Kiểm tra lần cuối trước khi gửi ảnh khuôn mặt.
+        if (
+          state.activeRequestId !== requestId ||
+          state.plateAllowedRequestId !== requestId
+        ) {
+          throw new Error("Yêu cầu xác thực đã thay đổi.");
+        }
+
         setMessage(
           gate,
           "",
-          "Đang xử lý 5 khung hình trên Raspberry Pi..."
+          "Đang xử lý 5 khung hình khuôn mặt trên Raspberry Pi..."
         );
 
         const response = await fetch("/api/face/verify", {
           method: "POST",
           credentials: "same-origin",
-          headers: { "Content-Type": "application/json" },
+          headers: {
+            "Content-Type": "application/json"
+          },
           body: JSON.stringify({
             request_id: requestId,
             gate: gate,
@@ -421,14 +826,17 @@
 
         if (data.verified === true) {
           el(gate, "-status").textContent = "Đã xác thực";
+
           setMessage(
             gate,
             "success",
             "✓ HỢP LỆ — " +
             (data.message || "Xác thực thành công.")
           );
+
         } else {
           el(gate, "-status").textContent = "Bị từ chối";
+
           setMessage(
             gate,
             "error",
@@ -438,6 +846,8 @@
         }
 
         state.activeRequestId = null;
+        state.plateAllowedRequestId = null;
+
         scheduleReset(gate);
 
       } catch (error) {
@@ -446,26 +856,35 @@
         if (error.status === 409) {
           state.activeRequestId = null;
           state.lastRequestId = null;
+          state.plateAllowedRequestId = null;
+
           el(gate, "-info").hidden = true;
           el(gate, "-status").textContent =
-            "Yêu cầu hết hạn hoặc đã xử lý";
+            "Yêu cầu không còn lượt xác thực";
         }
 
       } finally {
         captureBusy = false;
         updateCaptureButtons();
+
         pollGate("ENTRY");
         pollGate("EXIT");
       }
     }
-
     openCameraBtn.addEventListener("click", openCamera);
     stopCameraBtn.addEventListener("click", stopCamera);
-    document.getElementById("entry-capture").addEventListener("click", () => captureAndVerify("ENTRY"));
-    document.getElementById("exit-capture").addEventListener("click", () => captureAndVerify("EXIT"));
+
+    document
+      .getElementById("entry-capture")
+      .addEventListener("click", () => captureAndVerify("ENTRY"));
+
+    document
+      .getElementById("exit-capture")
+      .addEventListener("click", () => captureAndVerify("EXIT"));
 
     pollGate("ENTRY");
     pollGate("EXIT");
+
     const pollTimer = setInterval(() => {
       pollGate("ENTRY");
       pollGate("EXIT");
@@ -473,9 +892,14 @@
 
     window.addEventListener("beforeunload", () => {
       clearInterval(pollTimer);
-      for (const gate of ["ENTRY", "EXIT"]) clearTimeout(gates[gate].resetTimer);
+
+      for (const gate of ["ENTRY", "EXIT"]) {
+        clearTimeout(gates[gate].resetTimer);
+      }
+
       stopCamera();
     });
+
   </script>
 </body>
 

@@ -7,7 +7,13 @@ from routes.gps_routes import gps_bp
 from flask import Flask, jsonify, request
 from werkzeug.security import generate_password_hash
 
-from services.app_context import BASE_DIR, DATABASE, get_db, json_error
+from services.app_context import (
+    BASE_DIR,
+    DATABASE,
+    get_db,
+    json_error,
+    init_vehicles,
+)
 from services.auth_utils import login_required
 
 
@@ -26,9 +32,6 @@ if not app.config["SECRET_KEY"]:
 app.config.update(SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE="Lax")
 # Nếu triển khai qua HTTPS, có thể bật cookie secure bằng biến môi trường.
 app.config["SESSION_COOKIE_SECURE"] = os.environ.get("VINPARKING_HTTPS", "0") == "1"
-
-
-
 
 
 
@@ -65,35 +68,98 @@ def init_auth():
         conn.close()
 
 
+init_vehicles()
+
 # Khởi tạo bảng đăng nhập, không thay đổi dữ liệu bãi xe.
 init_auth()
 
 def init_face_auth():
+    """Khởi tạo bảng xác thực và lưu nhiều embedding khuôn mặt."""
     conn = get_db()
+
     try:
+        # 1. Bảng yêu cầu xác thực tại cổng ENTRY / EXIT.
         conn.execute("""
             CREATE TABLE IF NOT EXISTS face_auth_requests (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 uid TEXT NOT NULL,
                 driver_id TEXT,
                 state TEXT NOT NULL DEFAULT 'PENDING'
-                    CHECK (state IN ('PENDING', 'ALLOW', 'DENY', 'EXPIRED')),
+                    CHECK (
+                        state IN (
+                            'PENDING',
+                            'ALLOW',
+                            'DENY',
+                            'EXPIRED'
+                        )
+                    ),
                 created_at REAL NOT NULL,
                 processed_at REAL,
-                message TEXT
+                message TEXT,
+                gate_type TEXT NOT NULL DEFAULT 'ENTRY'
+                    CHECK (gate_type IN ('ENTRY', 'EXIT'))
             )
         """)
+
+        # 2. Tương thích với database cũ chưa có gate_type.
+        columns = {
+            row["name"]
+            for row in conn.execute(
+                "PRAGMA table_info(face_auth_requests)"
+            ).fetchall()
+        }
+
+        if "gate_type" not in columns:
+            conn.execute("""
+                ALTER TABLE face_auth_requests
+                ADD COLUMN gate_type TEXT
+            """)
+
+        # 3. Bảng lưu từng embedding riêng theo từng góc mặt.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS face_embedding_samples (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+                driver_id TEXT NOT NULL,
+
+                pose TEXT NOT NULL
+                    CHECK (pose IN ('FRONT', 'LEFT', 'RIGHT')),
+
+                encoding_json TEXT NOT NULL,
+
+                created_at TEXT NOT NULL
+                    DEFAULT (datetime('now', 'localtime')),
+
+                FOREIGN KEY (driver_id)
+                    REFERENCES drivers(driver_id)
+                    ON DELETE CASCADE
+            )
+        """)
+
+        # 4. Index giúp truy vấn embedding theo tài xế và góc mặt.
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_face_embedding_driver_pose
+            ON face_embedding_samples(driver_id, pose)
+        """)
+
+        # 5. Index cho hàng đợi xác thực.
         conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_face_auth_pending
-            ON face_auth_requests(state, created_at)
+            ON face_auth_requests(state, gate_type, created_at)
         """)
+
         conn.commit()
+
+    except sqlite3.Error:
+        conn.rollback()
+        app.logger.exception("Lỗi khởi tạo bảng xác thực khuôn mặt")
+        raise
+
     finally:
         conn.close()
 
 
 init_face_auth()
-
 
 @app.route("/api/rfid/scan/start", methods=["POST"])
 @login_required
@@ -176,6 +242,7 @@ from routes.auth_routes import auth_bp
 from routes.driver_routes import driver_bp
 from routes.face_routes import face_bp
 from routes.parking_routes import parking_bp
+from routes.plate_camera_routes import plate_camera_bp
 
 app.register_blueprint(auth_bp)
 app.register_blueprint(page_bp)
@@ -183,6 +250,7 @@ app.register_blueprint(driver_bp)
 app.register_blueprint(face_bp)
 app.register_blueprint(parking_bp)
 app.register_blueprint(gps_bp)
+app.register_blueprint(plate_camera_bp)
 
 if __name__ == "__main__":
     # Chỉ dùng debug=False trên Raspberry Pi; chạy qua mạng LAN theo nhu cầu.

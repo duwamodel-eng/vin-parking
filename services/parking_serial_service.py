@@ -125,9 +125,15 @@ def is_valid_uid(uid):
 
 
 def connect_database():
-    conn = sqlite3.connect(DB_PATH, timeout=5)
+    conn = sqlite3.connect(
+        DB_PATH,
+        timeout=10,
+        check_same_thread=True
+    )
+
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA busy_timeout = 5000")
+    conn.execute("PRAGMA busy_timeout = 10000")
+
     return conn
 
 
@@ -563,7 +569,7 @@ def send_s3_exit_result(ser, result, uid, token):
 
     print(f"[S3 -> ESP32] {message.strip()}")
 
-FACE_AUTH_TIMEOUT = 30.0
+FACE_AUTH_TIMEOUT = 150.0
 FACE_AUTH_POLL_INTERVAL = 0.2
 
 

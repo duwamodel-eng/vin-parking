@@ -1,0 +1,13 @@
+train: ../train/images
+val: ../valid/images
+test: ../test/images
+
+nc: 1
+names: ['license-plate']
+
+roboflow:
+  workspace: micah-saul-alvarez
+  project: vietnamese-license-plate-s8pj1-gvzup
+  version: 1
+  license: CC BY 4.0
+  url: https://app.roboflow.com/micah-saul-alvarez/vietnamese-license-plate-s8pj1-gvzup/1
