@@ -524,7 +524,6 @@ def encode_driver_face():
         ),
     })
 
-# ////////////////////////////////////////////////////////////////////////
 @driver_bp.route("/api/drivers/register", methods=["POST"])
 @login_required
 def register_driver():

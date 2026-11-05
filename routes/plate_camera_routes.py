@@ -252,10 +252,25 @@ def capture_and_authenticate_plate():
         )
 
         if not registered_plates:
-            return json_error(
-                "RFID hoặc tài xế không có biển số xe hợp lệ đã đăng ký.",
-                403,
+            message = (
+                "RFID hoặc tài xế không có biển số xe hợp lệ đã đăng ký."
             )
+
+            conn.execute(
+                """
+                UPDATE face_auth_requests
+                SET state = 'DENY',
+                    processed_at = ?,
+                    message = ?
+                WHERE id = ?
+                  AND state = 'PENDING'
+                """,
+                (time.time(), message, request_id),
+            )
+
+            conn.commit()
+
+            return json_error(message, 403)            
 
         # --------------------------------------------------
         # 2. Chụp một đợt. Hàm tự giải phóng camera sau khi xử lý.
@@ -397,6 +412,18 @@ def capture_and_authenticate_plate():
             time.time(),
             time.time(),
         ))
+
+        if status == "DENY":
+            conn.execute(
+                """
+                UPDATE face_auth_requests
+                SET state = 'DENY',
+                    processed_at = ?,
+                    message = ?
+                WHERE id = ? AND state = 'PENDING'
+                """,
+                (time.time(), message, request_id)
+            )
 
         conn.commit()
 

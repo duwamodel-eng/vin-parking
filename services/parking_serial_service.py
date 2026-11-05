@@ -231,8 +231,19 @@ def process_exit_request(uid, token, ser, ticket):
         conn = connect_database()
 
         if not is_valid_uid(uid) or not token:
+            try:
+                record_rfid_denied(
+                    conn,
+                    uid,
+                    "UID RFID không hợp lệ hoặc mã yêu cầu EXIT không hợp lệ.",
+                    gate_type="EXIT",
+                )
+            except Exception as exc:
+                conn.rollback()
+                print(f"[EXIT RFID STATUS][ERROR] {exc}")
+
             send_s3_exit_result(ser, "EXIT_DENIED", uid, token)
-            return
+            return            
 
         # Kiểm tra thẻ + tài xế ACTIVE + dữ liệu khuôn mặt.
         driver = get_entry_driver(conn, uid)
@@ -262,32 +273,64 @@ def process_exit_request(uid, token, ser, ticket):
         request_id = create_face_auth_request(
             conn, uid, driver_id, gate_type="EXIT"
         )
+        # RFID hợp lệ: báo LCD cổng ra chuyển sang chờ biển số.
+        send_s3_status(ser, "CARD_VALID")        
 
         print(
             f"[EXIT] Chờ nhận diện khuôn mặt: "
             f"request_id={request_id}, UID={uid}, token={token}"
         )
 
+        # 1. Chờ xác thực biển số trước.
+        plate_result = wait_plate_auth_result(conn, request_id)
+
+        if plate_result != "ALLOW":
+            send_s3_status(
+                ser,
+                "PLATE_TIMEOUT" if plate_result == "EXPIRED"
+                else "PLATE_DENIED"
+            )
+
+            save_history(conn, "EXIT_DENIED", uid)
+            send_s3_exit_result(ser, "EXIT_DENIED", uid, token)
+
+            print(
+                f"[EXIT DENIED] UID={uid}, "
+                f"plate_result={plate_result}"
+            )
+            return
+
+        # 2. Biển số hợp lệ: báo ESP32 chuyển sang chờ khuôn mặt.
+        send_s3_status(ser, "PLATE_VALID")
+
+        # 3. Chỉ sau khi biển số hợp lệ mới chờ khuôn mặt.
         result = wait_face_auth_result(conn, request_id)
 
         if result == "ALLOW":
-            # Đánh dấu token được phép trước khi gửi phản hồi.
             with authorized_exit_tokens_lock:
                 authorized_exit_tokens[token] = uid
 
             try:
+                send_s3_status(ser, "FACE_VALID")
                 send_s3_exit_result(ser, "EXIT_ALLOWED", uid, token)
                 print(f"[EXIT ALLOWED] UID={uid}, token={token}")
+
             except Exception:
-                # Không giữ token nếu không gửi được phản hồi.
                 with authorized_exit_tokens_lock:
                     authorized_exit_tokens.pop(token, None)
                 raise
+
         else:
-            # DENY/EXPIRED đều không được mở barrier.
+            send_s3_status(
+                ser,
+                "FACE_TIMEOUT" if result == "EXPIRED"
+                else "FACE_DENIED"
+            )
+
             save_history(conn, "EXIT_DENIED", uid)
             send_s3_exit_result(ser, "EXIT_DENIED", uid, token)
-            print(f"[EXIT DENIED] UID={uid}, result={result}")
+
+            print(f"[EXIT DENIED] UID={uid}, result={result}")        
 
     except Exception as exc:
         if conn is not None:
@@ -550,6 +593,17 @@ def send_wroom_result(ser, result):
     ser.flush()
     print(f"[WROOM -> ESP32] {message.strip()}")
 
+def send_s3_status(ser, status):
+    """Gửi trạng thái hiển thị trung gian, không thay thế phản hồi UID/token."""
+
+    message = f"RESULT,{status}\n"
+
+    with s3_write_lock:
+        ser.write(message.encode("utf-8"))
+        ser.flush()
+
+    print(f"[S3 STATUS] {message.strip()}")
+
 def send_s3_exit_result(ser, result, uid, token):
     """Gửi phản hồi đúng UID và token mà ESP32-S3 đang chờ."""
     if result not in (
@@ -569,25 +623,44 @@ def send_s3_exit_result(ser, result, uid, token):
 
     print(f"[S3 -> ESP32] {message.strip()}")
 
+PLATE_AUTH_TIMEOUT = 120.0
 FACE_AUTH_TIMEOUT = 150.0
 FACE_AUTH_POLL_INTERVAL = 0.2
 
 
-def record_rfid_denied(conn, uid, message):
-    """Lưu sự kiện RFID bị từ chối để giao diện web hiển thị."""
+def record_rfid_denied(conn, uid, message, gate_type="ENTRY"):
+    """Lưu sự kiện RFID bị từ chối cho đúng cổng để web hiển thị."""
+
+    gate_type = str(gate_type).strip().upper()
+
+    if gate_type not in ("ENTRY", "EXIT"):
+        raise ValueError("gate_type không hợp lệ")
+
     now = time.time()
     uid = (uid or "UNKNOWN").strip().upper()[:64]
 
     conn.execute(
         """
-        INSERT INTO face_auth_requests
-            (uid, driver_id, state, created_at, processed_at, message)
-        VALUES (?, NULL, 'DENY', ?, ?, ?)
+        INSERT INTO face_auth_requests (
+            uid,
+            driver_id,
+            state,
+            created_at,
+            processed_at,
+            message,
+            gate_type
+        )
+        VALUES (?, NULL, 'DENY', ?, ?, ?, ?)
         """,
-        (uid, now, now, message),
+        (uid, now, now, message, gate_type),
     )
+
     conn.commit()
-    print(f"[RFID DENIED] UID={uid} | {message}")
+
+    print(
+        f"[RFID DENIED][{gate_type}] "
+        f"UID={uid} | {message}"
+    )
 
 def create_face_auth_request(conn, uid, driver_id, gate_type="ENTRY"):
     """Tạo yêu cầu xác thực khuôn mặt cho đúng cổng."""
@@ -663,6 +736,77 @@ def wait_face_auth_result(conn, request_id):
     return state
 
 
+def wait_plate_auth_result(conn, request_id):
+    """Chờ kết quả biển số của đúng yêu cầu RFID."""
+
+    deadline = time.monotonic() + PLATE_AUTH_TIMEOUT
+
+    while time.monotonic() < deadline:
+        row = conn.execute(
+            """
+            SELECT status
+            FROM plate_auth_results
+            WHERE request_id = ?
+            LIMIT 1
+            """,
+            (request_id,)
+        ).fetchone()        
+
+        if row is not None:
+            status = str(row["status"]).strip().upper()
+
+            if status in ("ALLOW", "DENY"):
+                return status
+
+        request = conn.execute(
+            """
+            SELECT state
+            FROM face_auth_requests
+            WHERE id = ?
+            """,
+            (request_id,)
+        ).fetchone()
+
+        if request is None:
+            return "DENY"
+
+        state = str(request["state"]).strip().upper()
+
+        # Route có thể đã kết thúc yêu cầu khi biển số sai.
+        if state in ("DENY", "EXPIRED"):
+            return state
+
+        time.sleep(FACE_AUTH_POLL_INTERVAL)
+
+    # Hết thời gian chờ biển số: kết thúc yêu cầu đang PENDING.
+    now = time.time()
+
+    conn.execute(
+        """
+        UPDATE face_auth_requests
+        SET state = 'EXPIRED',
+            processed_at = ?,
+            message = 'Hết thời gian xác thực biển số'
+        WHERE id = ? AND state = 'PENDING'
+        """,
+        (now, request_id)
+    )
+    conn.commit()
+
+    row = conn.execute(
+        """
+        SELECT state
+        FROM face_auth_requests
+        WHERE id = ?
+        """,
+        (request_id,)
+    ).fetchone()
+
+    if row is None:
+        return "DENY"
+
+    return str(row["state"]).strip().upper()
+
 def process_wroom_card(conn, ser, uid):
     uid = uid.strip().upper()
 
@@ -670,8 +814,11 @@ def process_wroom_card(conn, ser, uid):
     if not is_valid_uid(uid):
         try:
             record_rfid_denied(
-                conn, uid, "Thẻ RFID không hợp lệ, vui lòng quét lại."
-            )
+                conn,
+                uid,
+                "Thẻ RFID không hợp lệ, vui lòng quét lại.",
+                gate_type="ENTRY",
+            )                         
         except Exception as exc:
             conn.rollback()
             print(f"[RFID STATUS][ERROR] {exc}")
@@ -705,7 +852,12 @@ def process_wroom_card(conn, ser, uid):
         print(f"[AUTH] {message} UID={uid}")
 
         try:
-            record_rfid_denied(conn, uid, message)
+            record_rfid_denied(
+                conn,
+                uid,
+                message,
+                gate_type="ENTRY",
+            )            
         except Exception as exc:
             conn.rollback()
             print(f"[RFID STATUS][ERROR] {exc}")
@@ -730,30 +882,54 @@ def process_wroom_card(conn, ser, uid):
         send_wroom_result(ser, "ENTRY_DENIED")
         return
 
-    # 5. Báo ngay cho ESP32: thẻ hợp lệ, đang chờ khuôn mặt.
+    # 5. RFID hợp lệ: báo ESP32 chuyển sang chờ biển số.
     send_wroom_result(ser, "CARD_VALID")
 
-    # 6. Chỉ chấp nhận ALLOW. Mọi trạng thái khác đều đóng cổng.
+    # 6. Chờ kết quả biển số theo đúng request_id.
+    try:
+        plate_result = wait_plate_auth_result(conn, request_id)
+    except Exception as exc:
+        conn.rollback()
+        print(f"[PLATE AUTH][ERROR] UID={uid}: {exc}")
+        plate_result = "DENY"
+
+    if plate_result != "ALLOW":
+        save_history(conn, "ENTRY_DENIED", uid)
+
+        if plate_result == "EXPIRED":
+            send_wroom_result(ser, "PLATE_TIMEOUT")
+            print(f"[ENTRY DENIED] UID={uid}, plate timeout")
+        else:
+            send_wroom_result(ser, "PLATE_DENIED")
+            print(f"[ENTRY DENIED] UID={uid}, plate denied")
+
+        return
+
+    # 7. Biển số hợp lệ: ESP32 chuyển sang chờ khuôn mặt.
+    send_wroom_result(ser, "PLATE_VALID")
+
+    # 8. Chỉ sau khi biển số hợp lệ mới xác thực khuôn mặt.
     try:
         result = wait_face_auth_result(conn, request_id)
     except Exception as exc:
         conn.rollback()
-        print(f"[FACE AUTH][ERROR] {exc}")
+        print(f"[FACE AUTH][ERROR] UID={uid}: {exc}")
         result = "DENY"
 
     if result == "ALLOW":
         save_history(conn, "ENTRY", uid)
         send_wroom_result(ser, "ENTRY_ALLOWED")
         print(f"[ACCESS GRANTED] UID={uid}")
+
     elif result == "EXPIRED":
         save_history(conn, "ENTRY_DENIED", uid)
         send_wroom_result(ser, "FACE_TIMEOUT")
         print(f"[ACCESS DENIED] UID={uid}, face timeout")
+
     else:
         save_history(conn, "ENTRY_DENIED", uid)
         send_wroom_result(ser, "FACE_DENIED")
-        print(f"[ACCESS DENIED] UID={uid}, result={result}")
-
+        print(f"[ACCESS DENIED] UID={uid}, face denied")
 
 def process_wroom_line(conn, ser, line):
     line = line.strip()

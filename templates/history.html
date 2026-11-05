@@ -22,6 +22,8 @@
       <a class="nav-link" href="{{ url_for('pages.drivers_page') }}">Quản lý tài xế</a>
 
       <a class="nav-link" href="{{ url_for('pages.verification_page') }}">Xác thực tài xế</a>
+
+      <a class="nav-link" href="{{ url_for('gps_api.gps_page') }}">Định vị GPS</a>
     </nav>
     <div class="user-area">
       <span>{{ session.get('username', 'Quản trị viên') }}</span>
@@ -70,7 +72,6 @@
               <th>Mã tài xế</th>
               <th>Tên tài xế</th>
               <th>UID thẻ</th>
-              <th>Vị trí</th>
             </tr>
           </thead>
           <tbody id="history-body">
@@ -145,7 +146,7 @@
         if (currentPage > totalPages) currentPage = totalPages;
 
         if (events.length === 0) {
-          body.innerHTML = '<tr><td colspan="6">Không có sự kiện phù hợp.</td></tr>';
+          body.innerHTML = '<tr><td colspan="5">Không có sự kiện phù hợp.</td></tr>';
         } else {
           body.innerHTML = events.map(event => `
             <tr>
@@ -154,7 +155,6 @@
               <td>${escapeHtml(event.driver_id || '—')}</td>
               <td>${escapeHtml(event.full_name || 'Chưa liên kết tài xế')}</td>
               <td>${escapeHtml(event.uid || '—')}</td>
-              <td>${escapeHtml(event.slot_id || '—')}</td>
             </tr>
           `).join('');
         }
@@ -165,7 +165,7 @@
         document.getElementById('prev').disabled = currentPage <= 1;
         document.getElementById('next').disabled = currentPage >= totalPages;
       } catch (err) {
-        body.innerHTML = '<tr><td colspan="6">Không tải được dữ liệu.</td></tr>';
+        body.innerHTML = '<tr><td colspan="5">Không tải được dữ liệu.</td></tr>';
         error.textContent = err instanceof Error
           ? err.message
           : 'Đã xảy ra lỗi khi tải lịch sử.';

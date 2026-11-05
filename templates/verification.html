@@ -152,6 +152,7 @@
       <a class="nav-link" href="{{ url_for('pages.history_page') }}">Lịch sử</a>
       <a class="nav-link" href="{{ url_for('pages.drivers_page') }}">Quản lý tài xế</a>
       <a class="nav-link active" href="{{ url_for('pages.verification_page') }}">Xác thực tài xế</a>
+      <a class="nav-link" href="{{ url_for('gps_api.gps_page') }}">Định vị GPS</a>
     </nav>
     <div class="user-area">
       <span>{{ session.get('username', 'Quản trị viên') }}</span>
@@ -549,9 +550,9 @@
 
             setMessage(
               gate,
-              "",
-              "Yêu cầu đang đứng đầu FIFO chung. " +
-              "Kiểm tra đúng tài xế rồi bấm nút xác thực."
+              "success",
+              "✓ RFID HỢP LỆ — ĐANG CHỜ BIỂN SỐ. " +
+              "Kiểm tra đúng tài xế rồi bấm nút chụp biển số."
             );
           }
 
